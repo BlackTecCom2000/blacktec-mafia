@@ -203,6 +203,66 @@ export function RoomSetup({
 
           <div className="field field--row">
             <label className="field__cell">
+              <span className="field__label">{t('setup.avengerShots')}</span>
+              <input
+                className="field__input field__input--num"
+                type="number"
+                min={0}
+                max={10}
+                value={settings.avengerShots}
+                onChange={(event) => patch({ avengerShots: Number(event.target.value) })}
+              />
+            </label>
+            <label className="field__cell">
+              <span className="field__label">{t('setup.mayorReveals')}</span>
+              <input
+                className="field__input field__input--num"
+                type="number"
+                min={0}
+                max={5}
+                value={settings.mayorReveals}
+                onChange={(event) => patch({ mayorReveals: Number(event.target.value) })}
+              />
+            </label>
+          </div>
+
+          <div className="field__cell field__cell--stack">
+            <label className="switch">
+              <input
+                type="checkbox"
+                checked={settings.doctorCanRepeatTarget}
+                onChange={(event) => patch({ doctorCanRepeatTarget: event.target.checked })}
+              />
+              <span>{t('setup.doctorRepeat')}</span>
+            </label>
+            <label className="switch">
+              <input
+                type="checkbox"
+                checked={settings.mafiaBossHides}
+                onChange={(event) => patch({ mafiaBossHides: event.target.checked })}
+              />
+              <span>{t('setup.bossHides')}</span>
+            </label>
+            <label className="switch">
+              <input
+                type="checkbox"
+                checked={settings.jokerEndsGame}
+                onChange={(event) => patch({ jokerEndsGame: event.target.checked })}
+              />
+              <span>{t('setup.jokerEnds')}</span>
+            </label>
+            <label className="switch">
+              <input
+                type="checkbox"
+                checked={settings.nightDeathCancelsCheck}
+                onChange={(event) => patch({ nightDeathCancelsCheck: event.target.checked })}
+              />
+              <span>{t('setup.deathCancels')}</span>
+            </label>
+          </div>
+
+          <div className="field field--row">
+            <label className="field__cell">
               <span className="field__label">{t('setup.maniacRule')}</span>
               <select
                 className="field__input"

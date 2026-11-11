@@ -1,4 +1,5 @@
-import type { GameState, PlayerState, Role } from './types';
+import type { GameState, NightActionKind, PlayerState, Role } from './types';
+import { ROLE_INFO } from './roles';
 import { pickWeighted } from './rng';
 import type { Rng } from './rng';
 
@@ -33,8 +34,16 @@ function candidates(state: GameState, bot: PlayerState): PlayerState[] {
   return alivePlayers(state).filter((player) => player.id !== bot.id);
 }
 
+/** The most suspicious candidate, used by most night abilities. */
+function mostSuspicious(state: GameState, bot: PlayerState, pool: PlayerState[]): PlayerState | null {
+  if (pool.length === 0) return null;
+  return pool.reduce((best, player) =>
+    suspicionOf(state, bot.id, player.id) > suspicionOf(state, bot.id, best.id) ? player : best,
+  );
+}
+
 export function chooseMafiaKill(state: GameState, rng: Rng, bot: PlayerState): string | null {
-  const pool = candidates(state, bot).filter((player) => player.role !== 'mafia');
+  const pool = candidates(state, bot).filter((player) => ROLE_INFO[player.role].faction !== 'mafia');
   if (pool.length === 0) return null;
   return pickWeighted(
     rng,
@@ -57,7 +66,7 @@ export function chooseDoctorHeal(state: GameState, rng: Rng, bot: PlayerState): 
   return pickWeighted(rng, weighted);
 }
 
-export function chooseDetectiveCheck(state: GameState, rng: Rng, bot: PlayerState): string | null {
+export function chooseCheck(state: GameState, rng: Rng, bot: PlayerState): string | null {
   const pool = candidates(state, bot);
   const unchecked = pool.filter((player) => bot.checks[player.id] === undefined);
   const usable = unchecked.length > 0 ? unchecked : pool;
@@ -82,6 +91,53 @@ export function chooseManiacKill(state: GameState, rng: Rng, bot: PlayerState): 
   );
 }
 
+/** The bodyguard protects the most trusted player of the table. */
+export function chooseGuard(state: GameState, rng: Rng, bot: PlayerState): string | null {
+  const pool = candidates(state, bot);
+  if (pool.length === 0) return null;
+  const trusted = pool.reduce((best, player) =>
+    suspicionOf(state, bot.id, player.id) < suspicionOf(state, bot.id, best.id) ? player : best,
+  );
+  return rng.next() < 0.6 ? trusted.id : (rng.pick(pool)?.id ?? null);
+}
+
+/** The avenger shoots the most suspected player. */
+export function chooseShot(state: GameState, rng: Rng, bot: PlayerState): string | null {
+  const pool = candidates(state, bot);
+  const target = mostSuspicious(state, bot, pool);
+  if (!target) return null;
+  return rng.next() < 0.8 ? target.id : (rng.pick(pool)?.id ?? null);
+}
+
+/** The blocker silences the player the mafia fears the most. */
+export function chooseBlock(state: GameState, rng: Rng, bot: PlayerState): string | null {
+  const pool = candidates(state, bot).filter(
+    (player) => ROLE_INFO[player.role].faction !== 'mafia',
+  );
+  if (pool.length === 0) return null;
+  const target = mostSuspicious(state, bot, pool);
+  if (!target) return null;
+  return rng.next() < 0.75 ? target.id : (rng.pick(pool)?.id ?? null);
+}
+
+/** The framer makes the most suspected investigator look like mafia. */
+export function chooseFrame(state: GameState, rng: Rng, bot: PlayerState): string | null {
+  const pool = candidates(state, bot).filter(
+    (player) => ROLE_INFO[player.role].faction !== 'mafia',
+  );
+  if (pool.length === 0) return null;
+  const target = mostSuspicious(state, bot, pool);
+  if (!target) return null;
+  return rng.next() < 0.7 ? target.id : (rng.pick(pool)?.id ?? null);
+}
+
+/** The medium asks about a dead player. */
+export function chooseQuestion(state: GameState, rng: Rng): string | null {
+  const dead = state.players.filter((player) => !player.alive);
+  if (dead.length === 0) return null;
+  return rng.pick(dead)?.id ?? null;
+}
+
 export function chooseVote(state: GameState, rng: Rng, bot: PlayerState): string | null {
   const pool = candidates(state, bot);
   if (pool.length === 0) return null;
@@ -91,7 +147,9 @@ export function chooseVote(state: GameState, rng: Rng, bot: PlayerState): string
     if (knownMafia.length > 0) return rng.pick(knownMafia)?.id ?? null;
   }
 
-  const eligible = bot.role === 'mafia' ? pool.filter((player) => player.role !== 'mafia') : pool;
+  const eligible = ROLE_INFO[bot.role].faction === 'mafia'
+    ? pool.filter((player) => ROLE_INFO[player.role].faction !== 'mafia')
+    : pool;
   const usable = eligible.length > 0 ? eligible : pool;
 
   const top = usable.reduce(
@@ -145,22 +203,48 @@ export function suspicionIncrease(state: GameState, botId: string, targetId: str
   memory.suspicion[targetId] = (memory.suspicion[targetId] ?? 0) + amount;
 }
 
+export interface BotNightChoice {
+  kind: NightActionKind;
+  targetId: string | null;
+}
+
+/**
+ * The night choice of a bot for the given action kind. Every kind is handled
+ * separately, so several copies of a role act independently.
+ */
 export function botNightChoice(
   state: GameState,
   rng: Rng,
   bot: PlayerState,
-): { role: Role; targetId: string | null } {
-  switch (bot.role) {
+  kinds: NightActionKind[] = [],
+): BotNightChoice {
+  const kind = kinds[0] ?? 'none';
+  switch (kind) {
     case 'mafia':
-      return { role: bot.role, targetId: chooseMafiaKill(state, rng, bot) };
-    case 'doctor':
-      return { role: bot.role, targetId: chooseDoctorHeal(state, rng, bot) };
-    case 'detective':
-    case 'sheriff':
-      return { role: bot.role, targetId: chooseDetectiveCheck(state, rng, bot) };
-    case 'maniac':
-      return { role: bot.role, targetId: chooseManiacKill(state, rng, bot) };
+      return { kind, targetId: chooseMafiaKill(state, rng, bot) };
+    case 'heal':
+      return { kind, targetId: chooseDoctorHeal(state, rng, bot) };
+    case 'check':
+    case 'checkAny':
+      return { kind, targetId: chooseCheck(state, rng, bot) };
+    case 'kill':
+      return { kind, targetId: chooseManiacKill(state, rng, bot) };
+    case 'guard':
+      return { kind, targetId: chooseGuard(state, rng, bot) };
+    case 'shot':
+      return { kind, targetId: chooseShot(state, rng, bot) };
+    case 'block':
+      return { kind, targetId: chooseBlock(state, rng, bot) };
+    case 'frame':
+      return { kind, targetId: chooseFrame(state, rng, bot) };
+    case 'question':
+      return { kind, targetId: chooseQuestion(state, rng) };
     default:
-      return { role: bot.role, targetId: null };
+      return { kind: 'none', targetId: null };
   }
+}
+
+/** The role of a player (helper for the bots and the tests). */
+export function roleOf(player: PlayerState): Role {
+  return player.role;
 }

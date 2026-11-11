@@ -11,6 +11,17 @@ export function RoleCard({ view }: { view: GameView }) {
   const role = me.role;
   const dead = !me.alive;
   const checks = view.myChecks;
+  const uses = me.uses ?? {};
+  // Only the roles with a limited ability show a counter.
+  const limited: Record<string, number> =
+    role === 'mayor'
+      ? { mayor: uses.mayor ?? 0 }
+      : role === 'avenger'
+        ? { avenger: uses.avenger ?? 0 }
+        : role === 'medium'
+          ? { medium: uses.medium ?? 0 }
+          : {};
+  const remaining = Object.entries(limited).filter(([, value]) => value > 0);
 
   return (
     <div className={`rolecard rolecard--${role} ${hidden ? 'is-hidden' : ''} ${dead ? 'is-dead' : ''}`}>
@@ -70,6 +81,34 @@ export function RoleCard({ view }: { view: GameView }) {
               {t('role.hide')}
             </button>
           </div>
+
+          <dl className="rolecard__rules">
+            <div>
+              <dt>{t('role.when')}</dt>
+              <dd>{t(`role.${role}.when`)}</dd>
+            </div>
+            <div>
+              <dt>{t('role.limit')}</dt>
+              <dd>{t(`role.${role}.limit`)}</dd>
+            </div>
+            <div>
+              <dt>{t('role.visibility')}</dt>
+              <dd>{t(`role.${role}.visibility`)}</dd>
+            </div>
+            {remaining.length > 0 ? (
+              <div>
+                <dt>{t('role.uses')}</dt>
+                <dd>
+                  {remaining.map(([, value]) => `${t(`role.${role}.ability`)}: ${value}`).join(' · ')}                </dd>
+              </div>
+            ) : null}
+            {me.personalWin ? (
+              <div>
+                <dt>{t('role.result')}</dt>
+                <dd>{t('gameover.personalWin')}</dd>
+              </div>
+            ) : null}
+          </dl>
         </>
       )}
     </div>

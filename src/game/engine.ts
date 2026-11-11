@@ -7,14 +7,18 @@ import {
   type Action,
   type ActionOk,
   type BotMemory,
+  type DeathCause,
   type GameConfig,
   type GameState,
   type KickVoteChoice,
   type LogEntry,
+  type MatchStats,
+  type NightChoiceKind,
   type NightReport,
   type PlayerState,
   type Role,
   type RoomSettings,
+  type RoundStat,
   type VoteReport,
 } from './types';
 import {
@@ -25,6 +29,7 @@ import {
   roleDeck,
   standardComposition,
   checkResultFor,
+  ROLE_INFO,
 } from './roles';
 import { createRng, type Rng } from './rng';
 import {
@@ -34,6 +39,7 @@ import {
   chooseVote,
   suspicionIncrease,
 } from './bots';
+import { cleanMessage, cleanName, cleanRoomName } from '../security/sanitize';
 
 export interface EngineOptions {
   hostId?: string;
@@ -58,6 +64,18 @@ interface LogOptions {
 export const KICK_VOTE_SECONDS = 30;
 /** Seconds before another kick vote may be started. */
 export const KICK_COOLDOWN_SECONDS = 45;
+/** How many shots the avenger gets when the room does not say otherwise. */
+export const DEFAULT_AVENGER_SHOTS = 2;
+/** How many times the mayor may reveal themselves. */
+export const DEFAULT_MAYOR_REVEALS = 1;
+/** How many questions the medium may ask. */
+export const MEDIUM_QUESTIONS = 1;
+
+/** One attack against a player. */
+interface Attack {
+  by: string;
+  kind: 'mafia' | 'maniac' | 'avenger';
+}
 
 export class MafiaEngine {
   readonly state: GameState;
@@ -92,6 +110,7 @@ export class MafiaEngine {
       log: [],
       winner: null,
       winReason: null,
+      personalWinners: [],
       hostId: options.hostId ?? 'host',
       startedAt: 0,
       lastNight: null,
@@ -101,6 +120,8 @@ export class MafiaEngine {
       kickVote: null,
       lastKickVoteAt: 0,
       nextKickVoteId: 1,
+      stats: emptyStats(),
+      roundStats: [],
     };
     this.state.config.nightSeconds = settings.nightSeconds;
     this.state.config.discussionSeconds = settings.discussionSeconds;
@@ -116,11 +137,11 @@ export class MafiaEngine {
     const limit = Math.min(this.state.settings.maxPlayers, TECHNICAL_MAX_PLAYERS);
     if (this.state.players.length >= limit) return null;
 
-    const cleanName = name.trim().slice(0, 18) || 'Player';
+    const safeName = cleanName(name) || 'Player';
     const isBot = options.isBot ?? false;
     const player: PlayerState = {
       id,
-      name: cleanName,
+      name: safeName,
       seat: this.state.players.length,
       role: 'citizen',
       alive: true,
@@ -133,10 +154,13 @@ export class MafiaEngine {
       deathDay: null,
       deathCause: null,
       checks: {},
+      uses: {},
+      revealed: false,
+      lastHealTarget: null,
     };
     this.state.players.push(player);
     this.state.botMemory[id] = emptyMemory();
-    this.pushLog('log.joined', { name: cleanName, seat: player.seat + 1 });
+    this.pushLog('log.joined', { name: safeName, seat: player.seat + 1 });
     this.state.version += 1;
     return player;
   }
@@ -199,7 +223,7 @@ export class MafiaEngine {
   setName(id: string, name: string): void {
     const player = this.find(id);
     if (!player) return;
-    const clean = name.trim().slice(0, 18);
+    const clean = cleanName(name);
     if (!clean) return;
     player.name = clean;
     this.state.version += 1;
@@ -221,7 +245,7 @@ export class MafiaEngine {
     const settings = this.state.settings;
     const next: RoomSettings = { ...settings, ...patch };
 
-    next.name = (patch.name ?? settings.name).trim().slice(0, 40);
+    next.name = cleanRoomName(patch.name ?? settings.name);
     next.maxPlayers = clamp(
       Math.round(patch.maxPlayers ?? settings.maxPlayers),
       settings.custom ? 2 : MIN_PLAYERS,
@@ -241,6 +265,24 @@ export class MafiaEngine {
     next.manualPhases = Boolean(patch.manualPhases ?? settings.manualPhases);
     next.allowIncomplete = Boolean(patch.allowIncomplete ?? settings.allowIncomplete);
     next.voiceEnabled = Boolean(patch.voiceEnabled ?? settings.voiceEnabled);
+    next.doctorCanRepeatTarget = Boolean(
+      patch.doctorCanRepeatTarget ?? settings.doctorCanRepeatTarget,
+    );
+    next.mafiaBossHides = Boolean(patch.mafiaBossHides ?? settings.mafiaBossHides);
+    next.jokerEndsGame = Boolean(patch.jokerEndsGame ?? settings.jokerEndsGame);
+    next.nightDeathCancelsCheck = Boolean(
+      patch.nightDeathCancelsCheck ?? settings.nightDeathCancelsCheck,
+    );
+    next.avengerShots = clamp(
+      Math.round(patch.avengerShots ?? settings.avengerShots),
+      0,
+      10,
+    );
+    next.mayorReveals = clamp(
+      Math.round(patch.mayorReveals ?? settings.mayorReveals),
+      0,
+      5,
+    );
     next.maniacWinRule = patch.maniacWinRule === 'faction' ? 'faction' : 'alone';
     next.roleSet = patch.roleSet === 'custom' ? 'custom' : 'standard';
 
@@ -249,9 +291,7 @@ export class MafiaEngine {
         Math.max(MIN_PLAYERS, Math.min(MAX_PLAYERS, this.state.players.length || MIN_PLAYERS)),
       );
     } else {
-      next.composition = normalizeComposition(
-        patch.composition ?? settings.composition,
-      );
+      next.composition = normalizeComposition(patch.composition ?? settings.composition);
       if (!isCompositionSane(next.composition)) return fail('err.composition');
     }
 
@@ -366,18 +406,33 @@ export class MafiaEngine {
       player.deathDay = null;
       player.deathCause = null;
       player.checks = {};
+      player.revealed = false;
+      player.lastHealTarget = null;
+      player.uses = this.initialUses();
       this.state.botMemory[player.id] = emptyMemory();
     });
     this.state.day = 1;
     this.state.startedAt = now;
+    this.state.stats = { ...emptyStats(), startedAt: now };
     this.state.winner = null;
     this.state.winReason = null;
+    this.state.personalWinners = [];
     this.state.lastNight = null;
     this.state.lastVote = null;
     this.state.kickVote = null;
     this.pushLog('log.started', { count: this.state.players.length });
     this.beginNight(now);
     return ok();
+  }
+
+  /** Limited abilities get their budget when the match starts. */
+  private initialUses(): Record<string, number> {
+    const settings = this.state.settings;
+    return {
+      mayor: settings.mayorReveals,
+      avenger: settings.avengerShots,
+      medium: MEDIUM_QUESTIONS,
+    };
   }
 
   restart(byId: string): ActionOk {
@@ -392,6 +447,9 @@ export class MafiaEngine {
       player.deathDay = null;
       player.deathCause = null;
       player.checks = {};
+      player.revealed = false;
+      player.lastHealTarget = null;
+      player.uses = {};
       this.state.botMemory[player.id] = emptyMemory();
     }
     this.state.phase = 'lobby';
@@ -402,9 +460,12 @@ export class MafiaEngine {
     this.state.log = [];
     this.state.winner = null;
     this.state.winReason = null;
+    this.state.personalWinners = [];
     this.state.lastNight = null;
     this.state.lastVote = null;
     this.state.kickVote = null;
+    this.state.roundStats = [];
+    this.state.stats = emptyStats();
     this.pushLog('log.restart');
     this.resetReadiness();
     this.state.version += 1;
@@ -430,6 +491,8 @@ export class MafiaEngine {
         return this.lobbyReadyUp(player, action.ready);
       case 'chat':
         return this.chat(player, action.text);
+      case 'mayorReveal':
+        return this.mayorReveal(player);
       case 'addBot':
         if (playerId !== this.state.hostId) return fail('err.host');
         if (this.state.phase !== 'lobby') return fail('err.phase');
@@ -460,16 +523,8 @@ export class MafiaEngine {
         return this.resetComposition(playerId);
       case 'setPassword':
         return this.setPasswordFlag(playerId, action.hasPassword);
-      case 'kill':
-        return this.nightAction(player, 'mafia', action.targetId, now);
-      case 'heal':
-        return this.nightAction(player, 'doctor', action.targetId, now);
-      case 'investigate':
-        return this.nightAction(player, 'detective', action.targetId, now);
-      case 'sheriffCheck':
-        return this.nightAction(player, 'sheriff', action.targetId, now);
-      case 'maniacKill':
-        return this.nightAction(player, 'maniac', action.targetId, now);
+      case 'night':
+        return this.nightAction(player, action.kind, action.targetId, now);
       case 'vote':
         return this.vote(player, action.targetId);
       case 'kickStart':
@@ -563,16 +618,31 @@ export class MafiaEngine {
     return ok();
   }
 
+  /** The mayor reveals themselves in the open and gets an extra vote. */
+  private mayorReveal(player: PlayerState): ActionOk {
+    const state = this.state;
+    if (state.phase !== 'discussion' && state.phase !== 'dawn') return fail('err.phase');
+    if (player.role !== 'mayor') return fail('err.role');
+    if (!player.alive) return fail('err.dead');
+    if (player.revealed) return fail('err.uses');
+    if ((player.uses.mayor ?? 0) <= 0) return fail('err.uses');
+    player.revealed = true;
+    player.uses.mayor = 0;
+    this.pushLog('log.mayorReveal', { name: player.name });
+    state.version += 1;
+    return ok();
+  }
+
   /** Dead players may only watch; they cannot write into the common chat. */
   private chat(player: PlayerState, raw: string): ActionOk {
-    const text = raw.trim().slice(0, 180);
+    const text = cleanMessage(raw);
     if (!text) return fail('err.unknown');
     const state = this.state;
     if (state.phase === 'lobby' || state.phase === 'gameover') return fail('err.phase');
     if (!player.alive) return fail('err.dead');
     let audience: 'all' | 'mafia' = 'all';
     if (state.phase === 'night') {
-      if (player.role !== 'mafia') return fail('err.phase');
+      if (!this.isMafia(player)) return fail('err.phase');
       audience = 'mafia';
     }
     this.pushLog('chat.entry', { name: player.name }, {
@@ -580,37 +650,79 @@ export class MafiaEngine {
       actorId: player.id,
       text,
     });
+    state.stats.messages += 1;
     state.version += 1;
     return ok();
   }
 
+  // ------------------------------------------------------------ night logic
+
+  /** The night actions a player is allowed to perform right now. */
+  allowedNightKinds(player: PlayerState): NightChoiceKind[] {
+    const info = ROLE_INFO[player.role];
+    if (info.nightAction === 'none') return [];
+    if (player.role === 'nurse') {
+      // The nurse inherits the healing only after the doctor is gone.
+      return this.hasLivingDoctor() ? [] : ['heal'];
+    }
+    if (player.role === 'mafiaBoss') return ['mafia'];
+    return [info.nightAction as NightChoiceKind];
+  }
+
+  private hasLivingDoctor(): boolean {
+    return this.state.players.some(
+      (player) => player.alive && player.role === 'doctor',
+    );
+  }
+
+  private isMafia(player: PlayerState): boolean {
+    return ROLE_INFO[player.role].faction === 'mafia';
+  }
+
   private nightAction(
     player: PlayerState,
-    role: Role,
+    kind: NightChoiceKind,
     targetId: string,
     now: number,
   ): ActionOk {
     const state = this.state;
     if (state.phase !== 'night') return fail('err.phase');
     if (!player.alive) return fail('err.dead');
-    if (player.role !== role) return fail('err.role');
+    if (!this.allowedNightKinds(player).includes(kind)) return fail('err.role');
+
     const target = this.find(targetId);
-    if (!target || !target.alive) return fail('err.target');
-    // Only the doctor may pick himself; everybody else needs another target.
-    if (target.id === player.id && role !== 'doctor') return fail('err.self');
-    if (role === 'mafia' && target.role === 'mafia') return fail('err.target');
+    if (!target) return fail('err.target');
 
-    if (role === 'mafia') state.night.mafiaVotes[player.id] = target.id;
-    if (role === 'doctor') state.night.doctorTargets[player.id] = target.id;
-    if (role === 'detective') state.night.detectiveTargets[player.id] = target.id;
-    if (role === 'sheriff') state.night.sheriffTargets[player.id] = target.id;
-    if (role === 'maniac') state.night.maniacTargets[player.id] = target.id;
+    // The medium asks about somebody who is already dead.
+    if (kind === 'question') {
+      if (target.alive) return fail('err.target');
+      if ((player.uses.medium ?? 0) <= 0) return fail('err.uses');
+      state.night.choices.question[player.id] = target.id;
+      player.uses.medium = 0;
+      this.refreshNightLock(now);
+      state.version += 1;
+      return ok();
+    }
 
+    if (!target.alive) return fail('err.target');
+    if (target.id === player.id && !ROLE_INFO[player.role].canSelfTarget) return fail('err.self');
+    if (kind === 'mafia' && this.isMafia(target)) return fail('err.target');
+
+    if (kind === 'heal' && !state.settings.doctorCanRepeatTarget) {
+      if (player.lastHealTarget === target.id) return fail('err.repeat');
+    }
+    if (kind === 'shot' && (player.uses.avenger ?? 0) <= 0) return fail('err.uses');
+
+    state.night.choices[kind][player.id] = target.id;
+    if (kind === 'shot') {
+      player.uses.avenger = Math.max(0, (player.uses.avenger ?? 0) - 1);
+    }
     this.refreshNightLock(now);
     state.version += 1;
     return ok();
   }
 
+  /** The vote of a player. The revealed mayor counts twice. */
   private vote(player: PlayerState, targetId: string | null): ActionOk {
     const state = this.state;
     if (state.phase !== 'voting') return fail('err.phase');
@@ -709,11 +821,12 @@ export class MafiaEngine {
     const target = this.find(vote.targetId);
     if (!target) return;
     this.pushLog('log.kickPassed', { name: target.name });
+    state.stats.kicks += 1;
     if (state.phase === 'lobby') {
       this.removePlayer(target.id);
       this.resetReadiness();
     } else {
-      // The seat stays in the match, but the character is handed to a bot.
+      // The seat stays in the match, the character is handed to a bot.
       this.markDisconnected(target.id);
     }
     state.version += 1;
@@ -774,6 +887,7 @@ export class MafiaEngine {
       player.hasVoted = false;
       player.votedFor = null;
       player.ready = false;
+      player.lastHealTarget = null;
     }
     this.pushLog('log.night', { day: state.day });
     for (const player of state.players) {
@@ -784,14 +898,18 @@ export class MafiaEngine {
   }
 
   private botNightAction(player: PlayerState): void {
-    const choice = botNightChoice(this.state, this.rng, player);
-    if (!choice.targetId) return;
-    const night = this.state.night;
-    if (choice.role === 'mafia') night.mafiaVotes[player.id] = choice.targetId;
-    if (choice.role === 'doctor') night.doctorTargets[player.id] = choice.targetId;
-    if (choice.role === 'detective') night.detectiveTargets[player.id] = choice.targetId;
-    if (choice.role === 'sheriff') night.sheriffTargets[player.id] = choice.targetId;
-    if (choice.role === 'maniac') night.maniacTargets[player.id] = choice.targetId;
+    const kinds = this.allowedNightKinds(player);
+    if (kinds.length === 0) return;
+    const choice = botNightChoice(this.state, this.rng, player, kinds);
+    if (!choice.targetId || choice.kind === 'none') return;
+    const kind = choice.kind;
+    this.state.night.choices[kind][player.id] = choice.targetId;
+    if (kind === 'shot') {
+      player.uses.avenger = Math.max(0, (player.uses.avenger ?? 0) - 1);
+    }
+    if (kind === 'question') {
+      player.uses.medium = 0;
+    }
     this.state.botMemory[player.id] = {
       ...(this.state.botMemory[player.id] ?? emptyMemory()),
       lastTarget: choice.targetId,
@@ -811,14 +929,13 @@ export class MafiaEngine {
 
   private allNightActionsIn(): boolean {
     const state = this.state;
-    const night = state.night;
     for (const player of state.players) {
       if (!player.alive) continue;
-      if (player.role === 'mafia' && !night.mafiaVotes[player.id]) return false;
-      if (player.role === 'doctor' && !night.doctorTargets[player.id]) return false;
-      if (player.role === 'detective' && !night.detectiveTargets[player.id]) return false;
-      if (player.role === 'sheriff' && !night.sheriffTargets[player.id]) return false;
-      if (player.role === 'maniac' && !night.maniacTargets[player.id]) return false;
+      const kinds = this.allowedNightKinds(player);
+      if (kinds.length === 0) continue;
+      for (const kind of kinds) {
+        if (!state.night.choices[kind][player.id]) return false;
+      }
     }
     return true;
   }
@@ -827,69 +944,198 @@ export class MafiaEngine {
     return this.state.players.every((player) => !player.alive || player.hasVoted);
   }
 
+  /**
+   * The night is resolved in a fixed order:
+   * 1) blocking, 2) framing, 3) protection, 4) investigations, 5) attacks,
+   * 6) the win check. The order never depends on the order of the players.
+   */
   private resolveNight(now: number): void {
     const state = this.state;
     const night = state.night;
+    const ordered = [...state.players].sort((a, b) => a.seat - b.seat);
     const deaths: NightReport['deaths'] = [];
-    const doctorTargets = new Set(Object.values(night.doctorTargets));
+    const dying = new Set<string>();
     let saved = false;
 
-    const strike = (targetId: string | null, cause: 'mafia' | 'maniac') => {
-      if (!targetId) return;
-      const target = this.find(targetId);
-      if (!target || !target.alive) return;
-      if (doctorTargets.has(target.id)) {
-        saved = true;
-        return;
+    // 1) blocking
+    const blocked = new Set<string>();
+    for (const blocker of ordered) {
+      if (!blocker.alive || blocker.role !== 'blocker') continue;
+      const targetId = night.choices.block[blocker.id];
+      if (!targetId) continue;
+      if (blocked.has(blocker.id)) {
+        this.pushLog('log.blocked', { name: blocker.name }, {
+          audience: 'private',
+          toId: blocker.id,
+        });
+        continue;
       }
+      blocked.add(targetId);
+      this.pushLog('log.blocked', { name: blocker.name }, {
+        audience: 'private',
+        toId: targetId,
+      });
+      this.pushLog('log.blockDone', { name: this.nameOf(targetId) }, {
+        audience: 'private',
+        toId: blocker.id,
+      });
+    }
+
+    // 2) framing
+    const framed = new Set<string>();
+    for (const framer of ordered) {
+      if (!framer.alive || framer.role !== 'framer' || blocked.has(framer.id)) continue;
+      const targetId = night.choices.frame[framer.id];
+      if (!targetId) continue;
+      framed.add(targetId);
+      this.pushLog('log.framed', { name: this.nameOf(targetId) }, { audience: 'mafia' });
+    }
+
+    // 3) protection
+    const protections = new Map<string, number>();
+    const bodyguards = new Map<string, string[]>();
+    for (const player of ordered) {
+      if (!player.alive || blocked.has(player.id)) continue;
+      if (player.role === 'doctor' || (player.role === 'nurse' && !this.hasLivingDoctor())) {
+        const targetId = night.choices.heal[player.id];
+        if (!targetId) continue;
+        protections.set(targetId, (protections.get(targetId) ?? 0) + 1);
+        player.lastHealTarget = targetId;
+        this.pushLog('log.savedPrivate', { name: this.nameOf(targetId) }, {
+          audience: 'private',
+          toId: player.id,
+        });
+      }
+      if (player.role === 'bodyguard') {
+        const targetId = night.choices.guard[player.id];
+        if (!targetId) continue;
+        const list = bodyguards.get(targetId) ?? [];
+        list.push(player.id);
+        bodyguards.set(targetId, list);
+        this.pushLog('log.guardPrivate', { name: this.nameOf(targetId) }, {
+          audience: 'private',
+          toId: player.id,
+        });
+      }
+    }
+
+    // Collect the attacks (the mafia acts as one collective attacker).
+    const attacks = new Map<string, Attack[]>();
+    const addAttack = (targetId: string, attack: Attack) => {
+      const list = attacks.get(targetId) ?? [];
+      list.push(attack);
+      attacks.set(targetId, list);
+    };
+    const mafiaTarget = this.mafiaChoice(blocked);
+    if (mafiaTarget === 'split') {
+      this.pushLog('log.mafiaSplit', undefined, { audience: 'mafia' });
+    } else if (mafiaTarget) {
+      addAttack(mafiaTarget, { by: 'mafia', kind: 'mafia' });
+    }
+    for (const player of ordered) {
+      if (!player.alive || blocked.has(player.id)) continue;
+      if (player.role === 'maniac') {
+        const targetId = night.choices.kill[player.id];
+        if (targetId) addAttack(targetId, { by: player.id, kind: 'maniac' });
+      }
+      if (player.role === 'avenger') {
+        const targetId = night.choices.shot[player.id];
+        if (targetId) addAttack(targetId, { by: player.id, kind: 'avenger' });
+      }
+    }
+
+    // Who dies from the attacks (computed before the checks so that a death can
+    // cancel an investigation result).
+    const outcome = new Map<string, DeathCause>();
+    for (const [targetId, list] of attacks) {
+      const target = this.find(targetId);
+      if (!target || !target.alive) continue;
+      const guards = bodyguards.get(targetId) ?? [];
+      if (guards.length > 0) {
+        // The bodyguard takes the hit instead of the target.
+        for (const guardId of guards) {
+          const guard = this.find(guardId);
+          if (guard && guard.alive) outcome.set(guardId, 'guard');
+        }
+        saved = true;
+        continue;
+      }
+      const protection = protections.get(targetId) ?? 0;
+      if (protection >= list.length) {
+        saved = true;
+        continue;
+      }
+      outcome.set(targetId, strongestCause(list));
+    }
+    for (const id of outcome.keys()) dying.add(id);
+
+    // 4) investigations
+    for (const player of ordered) {
+      if (!player.alive || blocked.has(player.id)) continue;
+      const kind = player.role === 'detective' ? 'check' : player.role === 'sheriff' ? 'checkAny' : null;
+      if (kind) {
+        const targetId = night.choices[kind][player.id];
+        if (!targetId) continue;
+        const target = this.find(targetId);
+        if (!target) continue;
+        let result = checkResultFor(target.role, kind === 'checkAny');
+        if (framed.has(target.id)) result = 'mafia';
+        if (kind === 'check' && target.role === 'mafiaBoss' && state.settings.mafiaBossHides) {
+          result = 'clean';
+        }
+        // A player killed this night does not get the result of the check.
+        if (state.settings.nightDeathCancelsCheck && dying.has(player.id)) {
+          this.pushLog('log.checkLost', { name: target.name }, {
+            audience: 'private',
+            toId: player.id,
+          });
+          continue;
+        }
+        player.checks[target.id] = result;
+        this.pushLog(result === 'clean' ? 'log.check.clean' : `log.check.${result}`, { name: target.name }, {
+          audience: 'private',
+          toId: player.id,
+        });
+      }
+      if (player.role === 'medium') {
+        const targetId = night.choices.question[player.id];
+        if (!targetId) continue;
+        const target = this.find(targetId);
+        if (!target) continue;
+        const result = target.role === 'mafia' ? 'mafia' : 'clean';
+        player.checks[target.id] = result;
+        this.pushLog(result === 'mafia' ? 'log.medium.mafia' : 'log.medium.clean', { name: target.name }, {
+          audience: 'private',
+          toId: player.id,
+        });
+      }
+    }
+
+    // 5) attacks
+    for (const [targetId, cause] of outcome) {
+      const target = this.find(targetId);
+      if (!target) continue;
       target.alive = false;
       target.deathDay = state.day;
       target.deathCause = cause;
-      deaths.push({ id: target.id, role: target.role });
-    };
-
-    const mafiaTarget = this.mafiaChoice();
-    if (mafiaTarget === 'split') {
-      this.pushLog('log.mafiaSplit', undefined, { audience: 'mafia' });
-    } else {
-      strike(mafiaTarget, 'mafia');
+      deaths.push({ id: target.id, role: target.role, cause });
+      if (cause === 'mafia') state.stats.deathsByCause.mafia += 1;
+      if (cause === 'maniac') state.stats.deathsByCause.maniac += 1;
+      if (cause === 'avenger') state.stats.deathsByCause.avenger += 1;
+      if (cause === 'guard') state.stats.deathsByCause.guard += 1;
     }
-    // Every maniac acts on their own.
-    for (const targetId of Object.values(night.maniacTargets)) {
-      strike(targetId, 'maniac');
-    }
-
-    for (const [detectiveId, targetId] of Object.entries(night.detectiveTargets)) {
-      const detective = this.find(detectiveId);
+    for (const [targetId, list] of attacks) {
+      const avenger = list.find((attack) => attack.kind === 'avenger');
+      if (!avenger) continue;
       const target = this.find(targetId);
-      if (!detective || !target) continue;
-      const result = checkResultFor(target.role, false);
-      detective.checks[target.id] = result;
-      this.pushLog(result === 'clean' ? 'log.check.clean' : 'log.check.mafia', { name: target.name }, {
-        audience: 'private',
-        toId: detective.id,
-      });
+      if (!target) continue;
+      const shooter = this.find(avenger.by);
+      if (!shooter) continue;
+      if (ROLE_INFO[target.role].faction === 'city') {
+        this.pushLog('log.avengerMiss', { name: shooter.name, target: target.name });
+      }
     }
-    for (const [sheriffId, targetId] of Object.entries(night.sheriffTargets)) {
-      const sheriff = this.find(sheriffId);
-      const target = this.find(targetId);
-      if (!sheriff || !target) continue;
-      const result = checkResultFor(target.role, true);
-      sheriff.checks[target.id] = result;
-      const code = result === 'clean' ? 'log.check.clean' : result === 'mafia' ? 'log.check.mafia' : 'log.check.maniac';
-      this.pushLog(code, { name: target.name }, {
-        audience: 'private',
-        toId: sheriff.id,
-      });
-    }
-    for (const [doctorId, targetId] of Object.entries(night.doctorTargets)) {
-      const doctor = this.find(doctorId);
-      if (!doctor) continue;
-      this.pushLog('log.savedPrivate', { name: this.nameOf(targetId) }, {
-        audience: 'private',
-        toId: doctor.id,
-      });
-    }
+    if (saved) state.stats.saves += 1;
 
     state.lastNight = { day: state.day, deaths, saved };
     state.phase = 'dawn';
@@ -907,16 +1153,19 @@ export class MafiaEngine {
         this.pushLog('log.killed', { name: this.nameOf(death.id), role: death.role });
       }
     }
+    // 6) the win check
     this.computeWinner();
     state.version += 1;
   }
 
   /** Majority of the mafia votes. A tie means the family did not agree. */
-  private mafiaChoice(): string | null | 'split' {
-    const votes = Object.values(this.state.night.mafiaVotes);
+  private mafiaChoice(blocked: Set<string> = new Set()): string | null | 'split' {
+    const votes = Object.entries(this.state.night.choices.mafia).filter(
+      ([playerId]) => !blocked.has(playerId),
+    );
     if (votes.length === 0) return null;
     const counts = new Map<string, number>();
-    for (const targetId of votes) {
+    for (const [, targetId] of votes) {
       counts.set(targetId, (counts.get(targetId) ?? 0) + 1);
     }
     let best: string | null = null;
@@ -1005,7 +1254,9 @@ export class MafiaEngine {
         abstains += 1;
         continue;
       }
-      counts[player.votedFor] = (counts[player.votedFor] ?? 0) + 1;
+      // A revealed mayor counts twice.
+      const weight = player.revealed ? 2 : 1;
+      counts[player.votedFor] = (counts[player.votedFor] ?? 0) + weight;
     }
     const ranked = Object.entries(counts).sort((a, b) => b[1] - a[1]);
     const top = ranked[0];
@@ -1027,6 +1278,9 @@ export class MafiaEngine {
     state.phaseEndsAt = now + state.config.revealSeconds * 1000;
     state.winner = null;
     state.winReason = null;
+    state.stats.votesCast += Object.values(counts).reduce((sum, value) => sum + value, 0);
+    state.stats.abstains += abstains;
+    if (tie) state.stats.ties += 1;
 
     if (executedId) {
       const target = this.find(executedId);
@@ -1034,26 +1288,73 @@ export class MafiaEngine {
         target.alive = false;
         target.deathDay = state.day;
         target.deathCause = 'vote';
+        state.stats.executed += 1;
+        state.stats.deathsByCause.vote += 1;
         this.pushLog('log.executed', { name: target.name, role: target.role });
+        if (target.role === 'joker') {
+          this.resolveJoker(target);
+        }
       }
     } else {
       this.pushLog('log.noExecution');
     }
+    this.pushRoundStat(now);
     this.computeWinner();
     state.version += 1;
+  }
+
+  /** The joker wins when the town votes them out. */
+  private resolveJoker(joker: PlayerState): void {
+    const state = this.state;
+    if (state.settings.jokerEndsGame) {
+      state.winner = 'joker';
+      state.winReason = 'log.win.joker';
+      this.pushLog('log.jokerWin', { name: joker.name });
+      return;
+    }
+    if (!state.personalWinners.includes(joker.id)) state.personalWinners.push(joker.id);
+    this.pushLog('log.jokerWin', { name: joker.name });
+  }
+
+  /** Stores the statistics of the finished round. */
+  private pushRoundStat(now: number): void {
+    const state = this.state;
+    const night = state.lastNight;
+    const vote = state.lastVote;
+    const round: RoundStat = {
+      day: state.day,
+      deaths: (night?.deaths ?? []).map((death) => ({
+        id: death.id,
+        name: this.nameOf(death.id),
+        role: death.role,
+        cause: death.cause,
+        day: state.day,
+      })),
+      votes: { ...(vote?.counts ?? {}) },
+      executedId: vote?.executedId ?? null,
+      tie: Boolean(vote?.tie),
+      abstains: vote?.abstains ?? 0,
+      saved: Boolean(night?.saved),
+      checks: 0,
+      messages: state.stats.messages,
+    };
+    state.roundStats.push(round);
+    if (state.roundStats.length > 64) state.roundStats.splice(0, state.roundStats.length - 64);
+    state.stats.rounds = state.roundStats.length;
+    state.stats.durationMs = state.startedAt ? now - state.startedAt : 0;
   }
 
   /**
    * Win conditions (identical in the engine, the UI and the rules):
    * - the city wins when no mafia and no maniac are left;
    * - the mafia wins when there are at least as many mafia as city players;
-   * - the maniac wins when it is the last living player ("alone", default) or,
-   *    in the "faction" mode, when every living player is a maniac.
+   * - the maniac wins as the last survivor ("alone", default) or, in the
+   *   "faction" mode, when every living player is a maniac.
    */
   private computeWinner(): void {
     const state = this.state;
     const alive = state.players.filter((player) => player.alive);
-    const mafia = alive.filter((player) => player.role === 'mafia').length;
+    const mafia = alive.filter((player) => ROLE_INFO[player.role].faction === 'mafia').length;
     const maniacs = alive.filter((player) => player.role === 'maniac').length;
     const city = alive.length - mafia - maniacs;
 
@@ -1134,15 +1435,49 @@ function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
+/** The cause of a death when several attacks hit the same player. */
+function strongestCause(list: Attack[]): DeathCause {
+  const priority: Record<Attack['kind'], number> = { mafia: 3, maniac: 2, avenger: 1 };
+  let best = list[0];
+  for (const attack of list) {
+    if (priority[attack.kind] > priority[best!.kind]) best = attack;
+  }
+  return best?.kind ?? null;
+}
+
 function emptyNight() {
   return {
-    mafiaVotes: {} as Record<string, string>,
-    doctorTargets: {} as Record<string, string>,
-    detectiveTargets: {} as Record<string, string>,
-    sheriffTargets: {} as Record<string, string>,
-    maniacTargets: {} as Record<string, string>,
+    choices: {
+      mafia: {} as Record<string, string>,
+      heal: {} as Record<string, string>,
+      check: {} as Record<string, string>,
+      checkAny: {} as Record<string, string>,
+      kill: {} as Record<string, string>,
+      guard: {} as Record<string, string>,
+      shot: {} as Record<string, string>,
+      block: {} as Record<string, string>,
+      frame: {} as Record<string, string>,
+      question: {} as Record<string, string>,
+    },
     locked: false,
     lockedAt: null,
+  };
+}
+
+function emptyStats(): MatchStats {
+  return {
+    rounds: 0,
+    deathsByCause: { mafia: 0, maniac: 0, avenger: 0, guard: 0, vote: 0 },
+    saves: 0,
+    checks: { mafia: 0, maniac: 0, clean: 0 },
+    votesCast: 0,
+    abstains: 0,
+    executed: 0,
+    ties: 0,
+    messages: 0,
+    kicks: 0,
+    startedAt: 0,
+    durationMs: 0,
   };
 }
 

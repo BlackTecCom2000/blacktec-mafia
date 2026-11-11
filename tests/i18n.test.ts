@@ -78,6 +78,38 @@ const REQUIRED_KEYS = [
 ];
 
 describe('localization', () => {
+  it('describes every role in both languages', async () => {
+    await loadEnglish();
+    const { ROLE_ORDER, ROLE_INFO } = await import('../src/game/roles');
+    for (const role of ROLE_ORDER) {
+      for (const part of ['name', 'desc', 'ability', 'when', 'limit', 'visibility']) {
+        const key = `role.${role}.${part}`;
+        expect(translate('ru', key), `missing RU ${key}`).not.toBe(key);
+        expect(translate('en', key), `missing EN ${key}`).not.toBe(key);
+      }
+      const factionKey = `role.faction.${ROLE_INFO[role].faction}`;
+      expect(translate('ru', factionKey)).not.toBe(factionKey);
+      expect(translate('en', factionKey)).not.toBe(factionKey);
+    }
+  });
+
+  it('keeps the same set of keys in both languages', async () => {
+    await loadEnglish();
+    const source = import.meta.glob('../src/i18n*.ts*', {
+      eager: true,
+      query: '?raw',
+      import: 'default',
+    }) as Record<string, string>;
+    const ru = source['../src/i18n.tsx'] ?? '';
+    const en = source['../src/i18n.en.ts'] ?? '';
+    const keys = (text: string) =>
+      new Set([...text.matchAll(/^  '([a-zA-Z0-9._]+)':/gm)].map((match) => match[1]));
+    const ruKeys = keys(ru);
+    const enKeys = keys(en);
+    for (const key of ruKeys) expect(enKeys.has(key), `EN misses ${key}`).toBe(true);
+    for (const key of enKeys) expect(ruKeys.has(key), `RU misses ${key}`).toBe(true);
+  });
+
   it('translates every new setting into Russian and English', () => {
     for (const key of REQUIRED_KEYS) {
       const ru = translate('ru', key);

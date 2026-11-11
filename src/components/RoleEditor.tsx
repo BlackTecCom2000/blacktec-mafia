@@ -1,16 +1,12 @@
 import { useI18n } from '../i18n';
-import { ROLE_ORDER, compositionTotal } from '../game/roles';
+import {
+  ROLE_ORDER,
+  ROLE_INFO,
+  balanceWarnings,
+  compositionTotal,
+} from '../game/roles';
 import type { Role, RoleComposition } from '../game/types';
 import { DaggerIcon, SealIcon, roleIcon } from './icons';
-
-const FACTION_KEY: Record<Role, string> = {
-  mafia: 'role.faction.mafia',
-  doctor: 'role.faction.city',
-  detective: 'role.faction.city',
-  sheriff: 'role.faction.city',
-  maniac: 'role.faction.maniac',
-  citizen: 'role.faction.city',
-};
 
 export function RoleEditor({
   composition,
@@ -25,6 +21,7 @@ export function RoleEditor({
 }) {
   const { t } = useI18n();
   const total = compositionTotal(composition);
+  const warnings = balanceWarnings(composition);
 
   const setCount = (role: Role, value: number) => {
     const next = { ...composition, [role]: Math.max(0, Math.min(24, Math.round(value))) };
@@ -35,6 +32,7 @@ export function RoleEditor({
     <div className="roleset">
       <ul className="roleset__list">
         {ROLE_ORDER.map((role) => {
+          const info = ROLE_INFO[role];
           const count = composition[role] ?? 0;
           return (
             <li key={role} className={`roleset__row roleset__row--${role}`}>
@@ -42,8 +40,17 @@ export function RoleEditor({
                 {roleIcon(role, { size: 14 })}
               </span>
               <span className="roleset__name">
-                {t(`role.${role}.name`)}
-                <em className="roleset__faction">{t(FACTION_KEY[role])}</em>
+                <span className="roleset__title">
+                  {t(`role.${role}.name`)}
+                  {!info.base ? <span className="roleset__tag">{t('roleset.optional')}</span> : null}
+                </span>
+                <em className="roleset__faction">{t(`role.faction.${info.faction}`)}</em>
+                <span className="roleset__desc">{t(`role.${role}.desc`)}</span>
+                <span className="roleset__meta">
+                  <span>{t(`role.${role}.when`)}</span>
+                  <span>{t(`role.${role}.limit`)}</span>
+                  <span>{t(`role.${role}.visibility`)}</span>
+                </span>
               </span>
               <span className="roleset__stepper">
                 <button
@@ -98,6 +105,16 @@ export function RoleEditor({
       ) : (
         <p className="roleset__hint">{t('roleset.match')}</p>
       )}
+
+      {warnings.length > 0 ? (
+        <ul className="roleset__warnings">
+          {warnings.map((warning) => (
+            <li key={warning.code} className="roleset__warning">
+              {t(warning.code, { killers: warning.killers, city: warning.city })}
+            </li>
+          ))}
+        </ul>
+      ) : null}
     </div>
   );
 }

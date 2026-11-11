@@ -384,6 +384,63 @@ export function Lobby({
                 />
                 <span>{t('setup.allowIncomplete')}</span>
               </label>
+              <label className="switch">
+                <input
+                  type="checkbox"
+                  checked={settings.doctorCanRepeatTarget}
+                  onChange={(event) => patchSettings({ doctorCanRepeatTarget: event.target.checked })}
+                />
+                <span>{t('setup.doctorRepeat')}</span>
+              </label>
+              <label className="switch">
+                <input
+                  type="checkbox"
+                  checked={settings.mafiaBossHides}
+                  onChange={(event) => patchSettings({ mafiaBossHides: event.target.checked })}
+                />
+                <span>{t('setup.bossHides')}</span>
+              </label>
+              <label className="switch">
+                <input
+                  type="checkbox"
+                  checked={settings.jokerEndsGame}
+                  onChange={(event) => patchSettings({ jokerEndsGame: event.target.checked })}
+                />
+                <span>{t('setup.jokerEnds')}</span>
+              </label>
+              <label className="switch">
+                <input
+                  type="checkbox"
+                  checked={settings.nightDeathCancelsCheck}
+                  onChange={(event) => patchSettings({ nightDeathCancelsCheck: event.target.checked })}
+                />
+                <span>{t('setup.deathCancels')}</span>
+              </label>
+
+              <div className="field field--row">
+                <label className="field__cell">
+                  <span className="field__label">{t('setup.avengerShots')}</span>
+                  <input
+                    className="field__input field__input--num"
+                    type="number"
+                    min={0}
+                    max={10}
+                    value={settings.avengerShots}
+                    onChange={(event) => patchSettings({ avengerShots: Number(event.target.value) })}
+                  />
+                </label>
+                <label className="field__cell">
+                  <span className="field__label">{t('setup.mayorReveals')}</span>
+                  <input
+                    className="field__input field__input--num"
+                    type="number"
+                    min={0}
+                    max={5}
+                    value={settings.mayorReveals}
+                    onChange={(event) => patchSettings({ mayorReveals: Number(event.target.value) })}
+                  />
+                </label>
+              </div>
 
               {settings.roleSet === 'custom' ? (
                 <>

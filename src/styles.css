@@ -3375,3 +3375,101 @@ svg {
   max-width: none;
   font-size: 12px;
 }
+/* ======================================================= role catalogue */
+.roleset__title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.roleset__tag {
+  padding: 1px 6px;
+  border: 1px solid rgba(201, 161, 90, 0.35);
+  border-radius: 2px;
+  font-size: 8.5px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--brass);
+}
+
+.roleset__desc {
+  display: block;
+  margin-top: 3px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-mute);
+}
+
+.roleset__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 5px;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--text-mute);
+}
+
+.roleset__meta span {
+  position: relative;
+  padding-left: 10px;
+}
+
+.roleset__meta span::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 4px;
+  height: 4px;
+  margin-top: -2px;
+  border-radius: 50%;
+  background: var(--brass-dim);
+}
+
+.roleset__warnings {
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 6px;
+}
+
+.roleset__warning {
+  padding: 8px 10px;
+  border: 1px solid rgba(231, 192, 122, 0.35);
+  background: rgba(231, 192, 122, 0.07);
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--brass-hi);
+}
+
+.rolecard__rules {
+  display: grid;
+  gap: 7px;
+  margin: 12px 0 0;
+  padding: 10px 0 0;
+  border-top: 1px solid var(--line-soft);
+}
+
+.rolecard__rules > div {
+  display: grid;
+  grid-template-columns: 96px 1fr;
+  gap: 10px;
+}
+
+.rolecard__rules dt {
+  font-size: 9px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--text-mute);
+}
+
+.rolecard__rules dd {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-dim);
+}

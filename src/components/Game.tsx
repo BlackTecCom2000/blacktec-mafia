@@ -1,5 +1,5 @@
 import { useEffect, useState, type CSSProperties, type ReactNode } from 'react';
-import type { Action } from '../game/types';
+import type { Action, NightChoiceKind } from '../game/types';
 import type { GameView, ViewPlayer } from '../game/view';
 import { logText, roleName, useI18n, type Translate } from '../i18n';
 import { formatClock, LanguageToggle, monogram, useCountdown } from './ui';
@@ -19,27 +19,25 @@ import {
 } from './icons';
 import { LogPanel } from './LogPanel';
 import { RoleCard } from './RoleCard';
+import { ROLE_INFO } from '../game/roles';
 
-const NIGHT_ROLES = ['mafia', 'doctor', 'detective', 'sheriff', 'maniac'] as const;
-type NightRole = (typeof NIGHT_ROLES)[number];
-
-function isNightRole(role: string | undefined): role is NightRole {
-  return role !== undefined && (NIGHT_ROLES as readonly string[]).includes(role);
-}
-
-function nightAction(role: NightRole, targetId: string): Action {
-  switch (role) {
-    case 'mafia':
-      return { type: 'kill', targetId };
-    case 'doctor':
-      return { type: 'heal', targetId };
-    case 'detective':
-      return { type: 'investigate', targetId };
-    case 'sheriff':
-      return { type: 'sheriffCheck', targetId };
-    case 'maniac':
-      return { type: 'maniacKill', targetId };
+/** The seats a player may pick for the given night action. */
+function nightTargets(view: GameView, kind: NightChoiceKind): string[] {
+  const me = view.me;
+  if (!me) return [];
+  const targets: string[] = [];
+  for (const player of view.players) {
+    if (player.id === me.id) continue;
+    if (kind === 'question') {
+      // The medium asks about somebody who is already dead.
+      if (!player.alive) targets.push(player.id);
+      continue;
+    }
+    if (!player.alive) continue;
+    if (kind === 'mafia' && player.isTeammate) continue;
+    targets.push(player.id);
   }
+  return targets;
 }
 
 function dayLabel(t: Translate, view: GameView): string {
@@ -77,8 +75,8 @@ export function Game({
   const me = view.me;
   const myPlayer = view.players.find((player) => player.isMe) ?? null;
   const meAlive = me?.alive ?? false;
-  const nightRole = me && isNightRole(me.role) ? me.role : null;
-  const canChooseNight = meAlive && view.phase === 'night' && nightRole !== null;
+  const nightKind = view.myNightKinds[0] ?? null;
+  const canChooseNight = meAlive && view.phase === 'night' && nightKind !== null;
   const hasVoted = myPlayer?.hasVoted ?? false;
   const canChooseVote = meAlive && view.phase === 'voting' && !hasVoted;
 
@@ -87,13 +85,8 @@ export function Game({
   }, [view.phase, view.day]);
 
   const targets = new Set<string>();
-  if (canChooseNight && nightRole) {
-    for (const player of view.players) {
-      if (!player.alive) continue;
-      if (nightRole !== 'doctor' && player.isMe) continue;
-      if (nightRole === 'mafia' && (player.isMe || player.isTeammate)) continue;
-      targets.add(player.id);
-    }
+  if (canChooseNight && nightKind) {
+    for (const id of nightTargets(view, nightKind)) targets.add(id);
   }
   if (canChooseVote) {
     for (const player of view.players) {
@@ -106,8 +99,8 @@ export function Game({
 
   const confirm = () => {
     if (!target) return;
-    if (view.phase === 'night' && nightRole) {
-      onAction(nightAction(nightRole, target));
+    if (view.phase === 'night' && nightKind) {
+      onAction({ type: 'night', kind: nightKind, targetId: target });
       setTarget(null);
       return;
     }
@@ -129,15 +122,22 @@ export function Game({
         : t('table.chatPlaceholder');
 
   const family =
-    me?.role === 'mafia'
+    me && ROLE_INFO[me.role].faction === 'mafia'
       ? view.players.filter((player) => player.isMe || player.isTeammate)
       : [];
+
+  const mayorCanReveal =
+    me?.role === 'mayor' &&
+    meAlive &&
+    !me.revealed &&
+    (me.uses.mayor ?? 0) > 0 &&
+    (view.phase === 'discussion' || view.phase === 'dawn');
 
   let centerBody: ReactNode = null;
   if (view.phase === 'night') {
     if (!meAlive) {
       centerBody = <p className="center__note">{t('table.spectator')}</p>;
-    } else if (!nightRole) {
+    } else if (!nightKind) {
       centerBody = (
         <>
           <p className="center__note">{t('table.sleep')}</p>
@@ -176,8 +176,10 @@ export function Game({
     } else {
       centerBody = (
         <>
-          <p className="center__note">{t(`role.${nightRole}.ability`)}</p>
-          <p className="center__sub">{t('table.chooseTarget')}</p>
+          <p className="center__note">{t(`role.${me?.role}.ability`)}</p>
+          <p className="center__sub">
+            {nightKind === 'question' ? t('table.chooseDead') : t('table.chooseTarget')}
+          </p>
         </>
       );
     }
@@ -245,7 +247,12 @@ export function Game({
     if (!meAlive) {
       centerBody = <p className="center__note">{t('table.spectator')}</p>;
     } else if (myPlayer?.ready) {
-      centerBody = <p className="center__note">{t('table.readyWaiting')}</p>;
+      centerBody = (
+        <>
+          <p className="center__note">{t('table.readyWaiting')}</p>
+          {mayorCanReveal ? <MayorButton onReveal={() => onAction({ type: 'mayorReveal' })} /> : null}
+        </>
+      );
     } else {
       centerBody = (
         <>
@@ -253,6 +260,7 @@ export function Game({
             {t('table.ready')}
           </button>
           <p className="center__sub">{t('table.readyHint')}</p>
+          {mayorCanReveal ? <MayorButton onReveal={() => onAction({ type: 'mayorReveal' })} /> : null}
         </>
       );
     }
@@ -525,6 +533,19 @@ function KickPanel({ view, onAction }: { view: GameView; onAction: (action: Acti
         </ul>
       )}
     </section>
+  );
+}
+
+function MayorButton({ onReveal }: { onReveal: () => void }) {
+  const { t } = useI18n();
+  return (
+    <div className="center__buttons">
+      <button type="button" className="btn btn--ghost btn--small" onClick={onReveal}>
+        <SealIcon size={14} />
+        <span>{t('role.mayor.ability')}</span>
+      </button>
+      <p className="center__sub">{t('role.mayor.limit')}</p>
+    </div>
   );
 }
 

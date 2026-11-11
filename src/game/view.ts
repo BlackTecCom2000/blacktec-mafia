@@ -5,14 +5,18 @@ import type {
   GameState,
   KickVote,
   LogEntry,
+  MatchStats,
+  NightChoiceKind,
   NightReport,
   Phase,
+  PlayerState,
   Role,
   RoomSettings,
+  RoundStat,
   VoteReport,
   Winner,
 } from './types';
-import { compositionCounts, compositionTotal, standardComposition } from './roles';
+import { compositionCounts, compositionTotal, standardComposition, ROLE_INFO } from './roles';
 
 export interface ViewPlayer {
   id: string;
@@ -34,6 +38,10 @@ export interface ViewPlayer {
   check: CheckResult | null;
   ready: boolean;
   lobbyReady: boolean;
+  /** The mayor revealed themselves in the open. */
+  revealed: boolean;
+  /** The player won on their own without ending the match. */
+  personalWin: boolean;
 }
 
 export interface ViewMe {
@@ -43,6 +51,10 @@ export interface ViewMe {
   alive: boolean;
   isHost: boolean;
   isBot: boolean;
+  revealed: boolean;
+  personalWin: boolean;
+  /** Remaining uses of limited abilities. */
+  uses: Record<string, number>;
 }
 
 export interface GameView {
@@ -57,6 +69,8 @@ export interface GameView {
   hostId: string;
   log: LogEntry[];
   myTarget: string | null;
+  /** The night actions the viewer may perform right now. */
+  myNightKinds: NightChoiceKind[];
   myChecks: Array<{ id: string; result: CheckResult }>;
   mafiaVotes: Record<string, string> | null;
   lastNight: NightReport | null;
@@ -78,12 +92,16 @@ export interface GameView {
   nightLocked: boolean;
   nightLockedAt: number | null;
   kickVote: KickVote | null;
+  /** Aggregated statistics of the match (visible to every viewer). */
+  stats: MatchStats;
+  /** Statistics of the finished rounds. */
+  roundStats: RoundStat[];
 }
 
 export function buildView(state: GameState, viewerId: string | null, now: number): GameView {
   const me = viewerId ? state.players.find((player) => player.id === viewerId) ?? null : null;
   const meRole = me?.role ?? null;
-  const mafiaViewer = meRole === 'mafia';
+  const mafiaViewer = meRole ? ROLE_INFO[meRole].faction === 'mafia' : false;
   const gameOver = state.phase === 'gameover';
 
   const votes: Record<string, number> = {};
@@ -96,8 +114,10 @@ export function buildView(state: GameState, viewerId: string | null, now: number
   const players: ViewPlayer[] = state.players.map((player) => {
     const isMe = player.id === me?.id;
     const roleVisible =
-      isMe || !player.alive || gameOver || (mafiaViewer && player.role === 'mafia');
-    const checkValue = me?.role === 'detective' || me?.role === 'sheriff' ? me.checks[player.id] : undefined;
+      isMe || !player.alive || gameOver || (mafiaViewer && ROLE_INFO[player.role].faction === 'mafia');
+    const canCheck =
+      meRole === 'detective' || meRole === 'sheriff' || meRole === 'medium';
+    const checkValue = canCheck ? me?.checks[player.id] : undefined;
     return {
       id: player.id,
       name: player.name,
@@ -110,7 +130,7 @@ export function buildView(state: GameState, viewerId: string | null, now: number
       isMe,
       isHost: player.id === state.hostId,
       isTeammate: Boolean(
-        mafiaViewer && !isMe && player.alive && player.role === 'mafia' && meRole === 'mafia',
+        mafiaViewer && !isMe && player.alive && ROLE_INFO[player.role].faction === 'mafia',
       ),
       hasVoted: player.hasVoted,
       votedFor:
@@ -123,6 +143,8 @@ export function buildView(state: GameState, viewerId: string | null, now: number
       check: checkValue ?? null,
       ready: player.ready,
       lobbyReady: player.lobbyReady,
+      revealed: player.revealed,
+      personalWin: state.personalWinners.includes(player.id),
     };
   });
 
@@ -135,20 +157,21 @@ export function buildView(state: GameState, viewerId: string | null, now: number
     return false;
   });
 
+  // The choice of the viewer for the current night.
   let myTarget: string | null = null;
+  const myNightKinds = me ? allowedKinds(state, me) : [];
   if (me?.alive && state.phase === 'night') {
-    if (me.role === 'mafia') myTarget = state.night.mafiaVotes[me.id] ?? null;
-    if (me.role === 'doctor') myTarget = state.night.doctorTargets[me.id] ?? null;
-    if (me.role === 'detective') myTarget = state.night.detectiveTargets[me.id] ?? null;
-    if (me.role === 'sheriff') myTarget = state.night.sheriffTargets[me.id] ?? null;
-    if (me.role === 'maniac') myTarget = state.night.maniacTargets[me.id] ?? null;
+    for (const kind of myNightKinds) {
+      myTarget = state.night.choices[kind][me.id] ?? null;
+      if (myTarget) break;
+    }
   }
 
   const myChecks = me
     ? Object.entries(me.checks).map(([id, result]) => ({ id, result: result as CheckResult }))
     : [];
 
-  const mafiaVotes = mafiaViewer ? { ...state.night.mafiaVotes } : null;
+  const mafiaVotes = mafiaViewer ? { ...state.night.choices.mafia } : null;
 
   const settings = state.settings;
   const effectiveComposition =
@@ -177,12 +200,16 @@ export function buildView(state: GameState, viewerId: string | null, now: number
           alive: me.alive,
           isHost: me.id === state.hostId,
           isBot: me.isBot,
+          revealed: me.revealed,
+          personalWin: state.personalWinners.includes(me.id),
+          uses: { ...me.uses },
         }
       : null,
     players,
     hostId: state.hostId,
     log,
     myTarget,
+    myNightKinds,
     myChecks,
     mafiaVotes,
     lastNight: state.lastNight,
@@ -199,5 +226,28 @@ export function buildView(state: GameState, viewerId: string | null, now: number
     nightLocked: state.night.locked,
     nightLockedAt: state.night.lockedAt,
     kickVote: state.kickVote,
+    stats: {
+      ...state.stats,
+      checks: { ...state.stats.checks },
+      deathsByCause: { ...state.stats.deathsByCause },
+    },
+    roundStats: state.roundStats.map((round) => ({ ...round, votes: { ...round.votes } })),
   };
+}
+
+/**
+ * The night actions the player may perform. The nurse only inherits the
+ * healing when no doctor is alive.
+ */
+export function allowedKinds(state: GameState, player: PlayerState): Array<
+  keyof GameState['night']['choices']
+> {
+  const info = ROLE_INFO[player.role];
+  if (info.nightAction === 'none') return [];
+  if (player.role === 'nurse') {
+    const doctorAlive = state.players.some((item) => item.alive && item.role === 'doctor');
+    return doctorAlive ? [] : ['heal'];
+  }
+  if (player.role === 'mafiaBoss') return ['mafia'];
+  return [info.nightAction];
 }

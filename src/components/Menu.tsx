@@ -135,6 +135,10 @@ export function Menu({
               <li>{t('rules.p3')}</li>
               <li>{t('rules.p4')}</li>
               <li>{t('rules.p5')}</li>
+              <li>{t('rules.p6')}</li>
+              <li>{t('rules.p7')}</li>
+              <li>{t('rules.p8')}</li>
+              <li>{t('rules.voteRule')}</li>
             </ol>
           </details>
         </section>

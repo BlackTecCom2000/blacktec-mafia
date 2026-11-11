@@ -1,6 +1,25 @@
 /** Core domain types for the BlackTec Mafia engine. */
 
-export type Role = 'mafia' | 'doctor' | 'detective' | 'sheriff' | 'maniac' | 'citizen';
+/**
+ * Base roles are used in the standard decks. The rest are optional and can
+ * only be used in a custom room.
+ */
+export type Role =
+  | 'mafia'
+  | 'doctor'
+  | 'detective'
+  | 'citizen'
+  | 'maniac'
+  | 'sheriff'
+  | 'bodyguard'
+  | 'avenger'
+  | 'mayor'
+  | 'medium'
+  | 'nurse'
+  | 'mafiaBoss'
+  | 'blocker'
+  | 'framer'
+  | 'joker';
 
 export type Faction = 'mafia' | 'city' | 'maniac';
 
@@ -16,30 +35,23 @@ export type Phase =
   | 'execution'
   | 'gameover';
 
-export type Winner = 'mafia' | 'city' | 'maniac' | null;
+export type Winner = 'mafia' | 'city' | 'maniac' | 'joker' | null;
 
-export type DeathCause = 'mafia' | 'maniac' | 'vote' | null;
+export type DeathCause = 'mafia' | 'maniac' | 'avenger' | 'guard' | 'vote' | null;
 
 export const MIN_PLAYERS = 6;
 export const MAX_PLAYERS = 12;
 /** Hard technical limit for custom rooms (no artificial 12-player cap). */
 export const TECHNICAL_MAX_PLAYERS = 24;
 
-/** Number of roles per table for the standard decks. */
-export interface RoleComposition {
-  mafia: number;
-  doctor: number;
-  detective: number;
-  sheriff: number;
-  maniac: number;
-  citizen: number;
-}
+/** How many of each role the table gets. */
+export type RoleComposition = Record<Role, number>;
 
 export type RoleSetMode = 'standard' | 'custom';
 
 /**
- * `alone`  — the maniac wins only when it is the last living player.
- * `faction` — the maniacs win when every living player is a maniac.
+ * `alone`  — the last living maniac wins on their own.
+ * `faction` — the maniacs win together when every other side is gone.
  */
 export type ManiacWinRule = 'alone' | 'faction';
 
@@ -68,6 +80,18 @@ export interface RoomSettings {
   maniacWinRule: ManiacWinRule;
   /** Voice chat is allowed in this room. */
   voiceEnabled: boolean;
+  /** The doctor may protect the same player two nights in a row. */
+  doctorCanRepeatTarget: boolean;
+  /** The mafia boss can look clean to the investigator. */
+  mafiaBossHides: boolean;
+  /** The joker's victory ends the whole match. */
+  jokerEndsGame: boolean;
+  /** How many shots the avenger has. */
+  avengerShots: number;
+  /** How many times the mayor may reveal themselves. */
+  mayorReveals: number;
+  /** A player killed at night loses the result of their investigation. */
+  nightDeathCancelsCheck: boolean;
 }
 
 export const DEFAULT_ROOM_SETTINGS: RoomSettings = {
@@ -83,10 +107,32 @@ export const DEFAULT_ROOM_SETTINGS: RoomSettings = {
   revealSeconds: 6,
   manualPhases: false,
   roleSet: 'standard',
-  composition: { mafia: 2, doctor: 1, detective: 1, sheriff: 0, maniac: 1, citizen: 3 },
+  composition: {
+    mafia: 2,
+    doctor: 1,
+    detective: 1,
+    citizen: 3,
+    maniac: 0,
+    sheriff: 0,
+    bodyguard: 0,
+    avenger: 0,
+    mayor: 0,
+    medium: 0,
+    nurse: 0,
+    mafiaBoss: 0,
+    blocker: 0,
+    framer: 0,
+    joker: 0,
+  },
   allowIncomplete: false,
   maniacWinRule: 'alone',
   voiceEnabled: true,
+  doctorCanRepeatTarget: true,
+  mafiaBossHides: true,
+  jokerEndsGame: false,
+  avengerShots: 2,
+  mayorReveals: 1,
+  nightDeathCancelsCheck: true,
 };
 
 export interface GameConfig {
@@ -110,6 +156,20 @@ export const DEFAULT_CONFIG: GameConfig = {
   nightGraceMs: 3000,
 };
 
+/** The kind of night action a role performs. */
+export type NightActionKind =
+  | 'none'
+  | 'mafia'
+  | 'heal'
+  | 'check'
+  | 'checkAny'
+  | 'kill'
+  | 'guard'
+  | 'shot'
+  | 'block'
+  | 'frame'
+  | 'question';
+
 export interface PlayerState {
   id: string;
   name: string;
@@ -126,19 +186,22 @@ export interface PlayerState {
   lobbyReady: boolean;
   deathDay: number | null;
   deathCause: DeathCause;
-  /** Detective / sheriff knowledge: target id -> result. */
+  /** Investigator knowledge: target id -> result. */
   checks: Record<string, CheckResult>;
+  /** Remaining uses of limited abilities (mayor, avenger, medium). */
+  uses: Record<string, number>;
+  /** The mayor revealed themselves in the open. */
+  revealed: boolean;
+  /** The player the doctor protected the previous night. */
+  lastHealTarget: string | null;
 }
 
+/** The night action kinds that actually store a choice. */
+export type NightChoiceKind = Exclude<NightActionKind, 'none'>;
+
 export interface NightState {
-  /** Every mafia member votes separately: player id -> target id. */
-  mafiaVotes: Record<string, string>;
-  /** Every doctor picks their own patient. */
-  doctorTargets: Record<string, string>;
-  detectiveTargets: Record<string, string>;
-  sheriffTargets: Record<string, string>;
-  /** Every maniac picks their own victim. */
-  maniacTargets: Record<string, string>;
+  /** Action kind -> player id -> target id. */
+  choices: Record<NightChoiceKind, Record<string, string>>;
   /** True once every required night action has been submitted. */
   locked: boolean;
   /** When the choices were locked (grace window start). */
@@ -147,7 +210,7 @@ export interface NightState {
 
 export interface NightReport {
   day: number;
-  deaths: Array<{ id: string; role: Role }>;
+  deaths: Array<{ id: string; role: Role; cause: DeathCause }>;
   saved: boolean;
 }
 
@@ -207,6 +270,8 @@ export interface GameState {
   log: LogEntry[];
   winner: Winner;
   winReason: string | null;
+  /** Players that won on their own without ending the match (the joker). */
+  personalWinners: string[];
   hostId: string;
   startedAt: number;
   lastNight: NightReport | null;
@@ -217,6 +282,48 @@ export interface GameState {
   /** Timestamp of the last finished kick vote (cooldown). */
   lastKickVoteAt: number;
   nextKickVoteId: number;
+  /** Aggregated statistics of the match. */
+  stats: MatchStats;
+  /** Statistics of every finished round. */
+  roundStats: RoundStat[];
+}
+
+/** One death, as it happened. */
+export interface DeathStat {
+  id: string;
+  name: string;
+  role: Role;
+  cause: DeathCause;
+  day: number;
+}
+
+/** Statistics of one finished round. */
+export interface RoundStat {
+  day: number;
+  deaths: DeathStat[];
+  votes: Record<string, number>;
+  executedId: string | null;
+  tie: boolean;
+  abstains: number;
+  saved: boolean;
+  checks: number;
+  messages: number;
+}
+
+/** Aggregated statistics of the current match. */
+export interface MatchStats {
+  rounds: number;
+  deathsByCause: Record<DeathCause extends null ? never : Exclude<DeathCause, null>, number>;
+  saves: number;
+  checks: { mafia: number; maniac: number; clean: number };
+  votesCast: number;
+  abstains: number;
+  executed: number;
+  ties: number;
+  messages: number;
+  kicks: number;
+  startedAt: number;
+  durationMs: number;
 }
 
 export type Action =
@@ -226,11 +333,8 @@ export type Action =
   | { type: 'lobbyReady'; ready: boolean }
   | { type: 'chat'; text: string }
   | { type: 'vote'; targetId: string | null }
-  | { type: 'kill'; targetId: string }
-  | { type: 'heal'; targetId: string }
-  | { type: 'investigate'; targetId: string }
-  | { type: 'sheriffCheck'; targetId: string }
-  | { type: 'maniacKill'; targetId: string }
+  | { type: 'night'; kind: NightChoiceKind; targetId: string }
+  | { type: 'mayorReveal' }
   | { type: 'addBot' }
   | { type: 'removeBot' }
   | { type: 'fillBots'; target: number }
@@ -264,4 +368,6 @@ export type EngineError =
   | 'err.voteOpen'
   | 'err.voteClosed'
   | 'err.cooldown'
+  | 'err.uses'
+  | 'err.repeat'
   | 'err.unknown';

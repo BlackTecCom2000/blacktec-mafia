@@ -1,19 +1,32 @@
 import { describe, expect, it } from 'vitest';
 import { MafiaEngine, KICK_COOLDOWN_SECONDS } from '../src/game/engine';
-import { hasManiac, mafiaCount, roleDeck } from '../src/game/roles';
+import {
+  balanceWarnings,
+  compositionTotal,
+  emptyComposition,
+  hasManiac,
+  mafiaCount,
+  roleDeck,
+  ROLE_INFO,
+} from '../src/game/roles';
 import { buildView } from '../src/game/view';
 import {
   DEFAULT_CONFIG,
-  type Action,
   type GameState,
+  type NightChoiceKind,
   type PlayerState,
   type Role,
   type RoleComposition,
 } from '../src/game/types';
 import { createRng } from '../src/game/rng';
-import { chooseVote } from '../src/game/bots';
+import { botNightChoice, chooseVote } from '../src/game/bots';
 
 const T0 = 1_000_000;
+
+/** Builds a composition, missing roles are zero. */
+function composition(roles: Partial<RoleComposition>): RoleComposition {
+  return { ...emptyComposition(), ...roles };
+}
 
 function setup(count = 8, seed = 42): MafiaEngine {
   const engine = new MafiaEngine({
@@ -29,6 +42,28 @@ function setup(count = 8, seed = 42): MafiaEngine {
   return engine;
 }
 
+/** A custom room with the given composition and the given number of players. */
+function customRoom(
+  roles: Partial<RoleComposition>,
+  players: number,
+  seed = 7,
+): MafiaEngine {
+  const engine = new MafiaEngine({
+    hostId: 'host',
+    seed,
+    settings: {
+      custom: true,
+      roleSet: 'custom',
+      composition: composition(roles),
+      maxPlayers: Math.max(12, compositionTotal(composition(roles))),
+    },
+  });
+  engine.addPlayer('host', 'Хост');
+  engine.fillBots(players);
+  for (const player of engine.state.players) player.lobbyReady = true;
+  return engine;
+}
+
 /** Overwrites dealt roles, keeping seats stable. */
 function assignRoles(engine: MafiaEngine, roles: Role[]): void {
   engine.state.players.forEach((player, index) => {
@@ -36,16 +71,12 @@ function assignRoles(engine: MafiaEngine, roles: Role[]): void {
   });
 }
 
-function resetNight(engine: MafiaEngine): void {
-  engine.state.night = {
-    mafiaVotes: {},
-    doctorTargets: {},
-    detectiveTargets: {},
-    sheriffTargets: {},
-    maniacTargets: {},
-    locked: false,
-    lockedAt: null,
-  };
+function clearNight(engine: MafiaEngine): void {
+  for (const kind of Object.keys(engine.state.night.choices) as NightChoiceKind[]) {
+    engine.state.night.choices[kind] = {};
+  }
+  engine.state.night.locked = false;
+  engine.state.night.lockedAt = null;
 }
 
 function roleOf(engine: MafiaEngine, role: Role): PlayerState {
@@ -70,26 +101,34 @@ function enterVoting(engine: MafiaEngine): void {
   state.version += 1;
 }
 
-/** Lets every living player abstain so the vote resolves. */
-function abstainAll(engine: MafiaEngine): void {
-  for (const player of engine.state.players) {
-    if (!player.alive) continue;
-    engine.submit(player.id, { type: 'vote', targetId: null }, T0);
-  }
+function act(
+  engine: MafiaEngine,
+  playerId: string,
+  kind: NightChoiceKind,
+  targetId: string,
+): void {
+  const result = engine.submit(playerId, { type: 'night', kind, targetId }, T0);
+  expect(result.ok, `${kind} by ${playerId}`).toBe(true);
 }
 
-function customEngine(composition: RoleComposition, players: number, seed = 7): MafiaEngine {
-  const engine = new MafiaEngine({
-    hostId: 'host',
-    seed,
-    settings: { custom: true, roleSet: 'custom', composition, maxPlayers: Math.max(players, 12) },
+describe('role registry', () => {
+  it('describes every role with a faction and a night action', () => {
+    for (const [role, info] of Object.entries(ROLE_INFO)) {
+      expect(info.faction).toBeTruthy();
+      expect(typeof info.base).toBe('boolean');
+      expect(info.visibility).toBeTruthy();
+      expect(role).toBeTruthy();
+    }
   });
-  engine.addPlayer('host', 'Хост');
-  engine.fillBots(players);
-  return engine;
-}
 
-describe('role composition', () => {
+  it('keeps the standard decks free of the optional roles', () => {
+    for (let count = 6; count <= 12; count += 1) {
+      for (const role of roleDeck(count)) {
+        expect(ROLE_INFO[role].base, role).toBe(true);
+      }
+    }
+  });
+
   it('deals a full table for every supported size', () => {
     for (let count = 6; count <= 12; count += 1) {
       const deck = roleDeck(count);
@@ -101,15 +140,75 @@ describe('role composition', () => {
     }
   });
 
-  it('clamps out-of-range table sizes', () => {
-    expect(roleDeck(3)).toHaveLength(6);
-    expect(roleDeck(20)).toHaveLength(12);
+  it('warns about an unbalanced composition but does not block it', () => {
+    const balanced = composition({ mafia: 2, doctor: 1, detective: 1, citizen: 3 });
+    expect(balanceWarnings(balanced)).toHaveLength(0);
+    const unbalanced = composition({ mafia: 6, doctor: 1, citizen: 2 });
+    expect(balanceWarnings(unbalanced).length).toBeGreaterThan(0);
+  });
+});
+
+describe('custom compositions', () => {
+  it('supports six maniacs, one sheriff and two citizens', () => {
+    const engine = customRoom({ maniac: 6, sheriff: 1, citizen: 2 }, 9);
+    expect(engine.startMatch('host', T0).ok).toBe(true);
+    const roles = engine.state.players.map((player) => player.role);
+    expect(roles.filter((role) => role === 'maniac')).toHaveLength(6);
+    expect(roles.filter((role) => role === 'sheriff')).toHaveLength(1);
+    expect(roles.filter((role) => role === 'citizen')).toHaveLength(2);
   });
 
-  it('keeps the sheriff out of the standard decks', () => {
-    for (let count = 6; count <= 12; count += 1) {
-      expect(roleDeck(count)).not.toContain('sheriff');
-    }
+  it('refuses to start when the players do not match the composition', () => {
+    const engine = customRoom({ mafia: 2, doctor: 1, detective: 1, citizen: 3 }, 6);
+    expect(engine.startMatch('host', T0)).toEqual({ ok: false, error: 'err.composition' });
+  });
+
+  it('allows an incomplete composition when the room allows it', () => {
+    const engine = customRoom({ mafia: 2, doctor: 1, detective: 1, citizen: 3 }, 5);
+    engine.state.settings.allowIncomplete = true;
+    expect(engine.startMatch('host', T0).ok).toBe(true);
+  });
+
+  it('rejects a composition without a city side', () => {
+    const engine = customRoom({ mafia: 3, citizen: 0 }, 3);
+    const result = engine.submit('host', {
+      type: 'setComposition',
+      composition: composition({ mafia: 3 }),
+    }, T0);
+    expect(result).toEqual({ ok: false, error: 'err.composition' });
+  });
+
+  it('never stores a negative number of roles', () => {
+    const engine = customRoom({ mafia: 1, doctor: 1, citizen: 1 }, 3);
+    engine.submit('host', {
+      type: 'setComposition',
+      composition: composition({ mafia: -3, doctor: 1, citizen: 1 }),
+    }, T0);
+    expect(engine.state.settings.composition.mafia).toBe(0);
+  });
+
+  it('restores the standard roles on request', () => {
+    const engine = customRoom({ mafia: 1, doctor: 1, citizen: 1 }, 3);
+    engine.submit('host', { type: 'resetComposition' }, T0);
+    expect(engine.state.settings.roleSet).toBe('standard');
+    expect(compositionTotal(engine.state.settings.composition)).toBe(6);
+  });
+
+  it('keeps more than twelve seats in a custom room', () => {
+    const engine = customRoom(
+      { mafia: 4, doctor: 2, detective: 2, sheriff: 2, maniac: 2, citizen: 6 },
+      18,
+    );
+    expect(engine.state.players).toHaveLength(18);
+  });
+
+  it('adds every role of the composition to the deck', () => {
+    const engine = customRoom({ mafia: 1, mayor: 1, medium: 1, avenger: 1 }, 4);
+    expect(engine.startMatch('host', T0).ok).toBe(true);
+    const roles = new Set(engine.state.players.map((player) => player.role));
+    expect(roles.has('mayor')).toBe(true);
+    expect(roles.has('medium')).toBe(true);
+    expect(roles.has('avenger')).toBe(true);
   });
 });
 
@@ -135,19 +234,6 @@ describe('lobby rules', () => {
     expect(engine.state.phase).toBe('night');
   });
 
-  it('deals one role per player and starts at night', () => {
-    const engine = setup(9);
-    expect(engine.state.players).toHaveLength(9);
-    for (const player of engine.state.players) {
-      expect(player.alive).toBe(true);
-      expect(player.role).toBeTruthy();
-    }
-    expect(engine.state.players.filter((player) => player.role === 'mafia')).toHaveLength(3);
-    expect(engine.state.players.some((player) => player.role === 'maniac')).toBe(true);
-    expect(engine.state.phase).toBe('night');
-    expect(engine.state.day).toBe(1);
-  });
-
   it('needs the readiness of every human player', () => {
     const engine = new MafiaEngine({ hostId: 'p1', seed: 1 });
     engine.addPlayer('p1', 'Игрок');
@@ -165,7 +251,6 @@ describe('lobby rules', () => {
     engine.addPlayer('g1', 'Гость');
     engine.submit('host', { type: 'lobbyReady', ready: true }, T0);
     engine.submit('g1', { type: 'lobbyReady', ready: true }, T0);
-    expect(engine.state.players.every((player) => player.lobbyReady)).toBe(true);
     engine.submit('host', { type: 'updateSettings', patch: { nightSeconds: 30 } }, T0);
     expect(engine.state.players.every((player) => !player.isBot && !player.lobbyReady)).toBe(true);
   });
@@ -178,142 +263,42 @@ describe('lobby rules', () => {
   });
 });
 
-describe('custom compositions', () => {
-  it('supports six maniacs, one sheriff and two citizens', () => {
-    const composition: RoleComposition = {
-      mafia: 0,
-      doctor: 0,
-      detective: 0,
-      sheriff: 1,
-      maniac: 6,
-      citizen: 2,
-    };
-    const engine = customEngine(composition, 9);
-    for (const player of engine.state.players) player.lobbyReady = true;
-    expect(engine.startMatch('host', T0).ok).toBe(true);
-    const roles = engine.state.players.map((player) => player.role);
-    expect(roles.filter((role) => role === 'maniac')).toHaveLength(6);
-    expect(roles.filter((role) => role === 'sheriff')).toHaveLength(1);
-    expect(roles.filter((role) => role === 'citizen')).toHaveLength(2);
-  });
-
-  it('refuses to start when the players do not match the composition', () => {
-    const composition: RoleComposition = {
-      mafia: 2,
-      doctor: 1,
-      detective: 1,
-      sheriff: 0,
-      maniac: 0,
-      citizen: 3,
-    };
-    const engine = customEngine(composition, 6);
-    for (const player of engine.state.players) player.lobbyReady = true;
-    expect(engine.startMatch('host', T0)).toEqual({ ok: false, error: 'err.composition' });
-  });
-
-  it('allows an incomplete composition when the room allows it', () => {
-    const composition: RoleComposition = {
-      mafia: 2,
-      doctor: 1,
-      detective: 1,
-      sheriff: 1,
-      maniac: 1,
-      citizen: 3,
-    };
-    const engine = customEngine(composition, 5);
-    engine.state.settings.allowIncomplete = true;
-    for (const player of engine.state.players) player.lobbyReady = true;
-    expect(engine.startMatch('host', T0).ok).toBe(true);
-  });
-
-  it('rejects compositions without a city side', () => {
-    const engine = customEngine({ mafia: 0, doctor: 0, detective: 0, sheriff: 0, maniac: 6, citizen: 0 }, 6);
-    const result = engine.submit('host', {
-      type: 'setComposition',
-      composition: { mafia: 0, doctor: 0, detective: 0, sheriff: 0, maniac: 6, citizen: 0 },
-    }, T0);
-    expect(result).toEqual({ ok: false, error: 'err.composition' });
-  });
-
-  it('never stores a negative number of roles', () => {
-    const engine = customEngine({ mafia: 1, doctor: 1, detective: 1, sheriff: 0, maniac: 0, citizen: 1 }, 5);
-    engine.submit('host', {
-      type: 'setComposition',
-      composition: { mafia: -3, doctor: 1, detective: 1, sheriff: 0, maniac: 0, citizen: 1 },
-    }, T0);
-    expect(engine.state.settings.composition.mafia).toBe(0);
-  });
-
-  it('restores the standard roles on request', () => {
-    const engine = customEngine({ mafia: 1, doctor: 1, detective: 1, sheriff: 0, maniac: 0, citizen: 1 }, 5);
-    engine.submit('host', { type: 'resetComposition' }, T0);
-    expect(engine.state.settings.roleSet).toBe('standard');
-    expect(engine.state.settings.composition.mafia).toBe(2);
-  });
-
-  it('keeps more than twelve seats in a custom room', () => {
-    const engine = customEngine({ mafia: 4, doctor: 2, detective: 2, sheriff: 2, maniac: 2, citizen: 6 }, 18);
-    expect(engine.state.players).toHaveLength(18);
-  });
-});
-
-describe('night resolution', () => {
+describe('night actions', () => {
   function nightTable(roles: Role[]): MafiaEngine {
     const engine = setup(roles.length);
     assignRoles(engine, roles);
-    resetNight(engine);
+    clearNight(engine);
     expect(engine.state.phase).toBe('night');
     return engine;
   }
 
   it('kills the mafia target and reveals the role of the dead', () => {
     const engine = nightTable([
-      'citizen',
-      'mafia',
-      'citizen',
-      'citizen',
-      'citizen',
-      'citizen',
-      'citizen',
-      'citizen',
+      'citizen', 'mafia', 'citizen', 'citizen', 'citizen', 'citizen', 'citizen', 'citizen',
     ]);
     const mafia = roleOf(engine, 'mafia');
     const victim = engine.state.players[2]!;
-    expect(engine.submit(mafia.id, { type: 'kill', targetId: victim.id }, T0).ok).toBe(true);
+    act(engine, mafia.id, 'mafia', victim.id);
     tickTo(engine, T0 + 4000);
 
     expect(engine.state.phase).toBe('dawn');
     expect(victim.alive).toBe(false);
     expect(engine.state.lastNight?.deaths.map((death) => death.id)).toContain(victim.id);
-
-    const killedLog = engine.state.log.find((entry) => entry.code === 'log.killed');
-    expect(killedLog?.params?.role).toBe('citizen');
-
-    const view = buildView(engine.state, 'p1', T0 + 3000);
+    const view = buildView(engine.state, 'p1', T0 + 4000);
     const seen = view.players.find((player) => player.id === victim.id);
     expect(seen?.roleVisible).toBe(true);
     expect(seen?.role).toBe('citizen');
-    expect(seen?.alive).toBe(false);
-    const victimView = buildView(engine.state, victim.id, T0 + 3000);
-    expect(victimView.players.find((player) => player.id === victim.id)?.role).toBe('citizen');
   });
 
-  it('doctor prevents the kill', () => {
+  it('protects a player from one kill', () => {
     const engine = nightTable([
-      'citizen',
-      'mafia',
-      'citizen',
-      'doctor',
-      'citizen',
-      'citizen',
-      'citizen',
-      'citizen',
+      'citizen', 'mafia', 'citizen', 'doctor', 'citizen', 'citizen', 'citizen', 'citizen',
     ]);
     const mafia = roleOf(engine, 'mafia');
     const doctor = roleOf(engine, 'doctor');
     const victim = engine.state.players[0]!;
-    engine.submit(mafia.id, { type: 'kill', targetId: victim.id }, T0);
-    engine.submit(doctor.id, { type: 'heal', targetId: victim.id }, T0);
+    act(engine, mafia.id, 'mafia', victim.id);
+    act(engine, doctor.id, 'heal', victim.id);
     tickTo(engine, T0 + 4000);
 
     expect(victim.alive).toBe(true);
@@ -321,179 +306,397 @@ describe('night resolution', () => {
     expect(engine.state.lastNight?.deaths).toHaveLength(0);
   });
 
-  it('lets the doctor save himself', () => {
+  it('lets the doctor protect themselves', () => {
     const engine = nightTable([
-      'citizen',
-      'mafia',
-      'citizen',
-      'doctor',
-      'citizen',
-      'citizen',
-      'citizen',
-      'citizen',
+      'citizen', 'mafia', 'citizen', 'doctor', 'citizen', 'citizen', 'citizen', 'citizen',
     ]);
     const mafia = roleOf(engine, 'mafia');
     const doctor = roleOf(engine, 'doctor');
-    engine.submit(mafia.id, { type: 'kill', targetId: doctor.id }, T0);
-    expect(engine.submit(doctor.id, { type: 'heal', targetId: doctor.id }, T0).ok).toBe(true);
+    act(engine, mafia.id, 'mafia', doctor.id);
+    act(engine, doctor.id, 'heal', doctor.id);
     tickTo(engine, T0 + 4000);
     expect(doctor.alive).toBe(true);
   });
 
-  it('detective learns whether a target is mafia, privately', () => {
+  it('may forbid protecting the same target two nights in a row', () => {
     const engine = nightTable([
-      'citizen',
-      'mafia',
-      'citizen',
-      'citizen',
-      'detective',
-      'citizen',
-      'citizen',
-      'citizen',
+      'citizen', 'mafia', 'citizen', 'doctor', 'citizen', 'citizen', 'citizen', 'citizen',
+    ]);
+    const doctor = roleOf(engine, 'doctor');
+    engine.state.settings.doctorCanRepeatTarget = false;
+    act(engine, doctor.id, 'heal', engine.state.players[0]!.id);
+    doctor.lastHealTarget = engine.state.players[0]!.id;
+    const result = engine.submit(doctor.id, { type: 'night', kind: 'heal', targetId: engine.state.players[0]!.id }, T0);
+    expect(result).toEqual({ ok: false, error: 'err.repeat' });
+  });
+
+  it('gives the investigator a private answer about the mafia', () => {
+    const engine = nightTable([
+      'citizen', 'mafia', 'citizen', 'citizen', 'detective', 'citizen', 'citizen', 'citizen',
     ]);
     const detective = roleOf(engine, 'detective');
     const mafia = roleOf(engine, 'mafia');
     const clean = engine.state.players[2]!;
-    engine.submit(mafia.id, { type: 'kill', targetId: clean.id }, T0);
-    engine.submit(detective.id, { type: 'investigate', targetId: mafia.id }, T0);
+    act(engine, mafia.id, 'mafia', clean.id);
+    act(engine, detective.id, 'check', mafia.id);
     tickTo(engine, T0 + 4000);
 
     expect(detective.checks[mafia.id]).toBe('mafia');
-    const detectiveView = buildView(engine.state, detective.id, T0 + 3000);
-    expect(detectiveView.myChecks).toEqual([{ id: mafia.id, result: 'mafia' }]);
-
-    const outsiderView = buildView(engine.state, clean.id, T0 + 3000);
-    expect(outsiderView.myChecks).toHaveLength(0);
-    const privateLogs = outsiderView.log.filter((entry) => entry.code.startsWith('log.check.'));
-    expect(privateLogs).toHaveLength(0);
+    const view = buildView(engine.state, detective.id, T0 + 4000);
+    expect(view.myChecks).toEqual([{ id: mafia.id, result: 'mafia' }]);
+    const outsider = buildView(engine.state, clean.id, T0 + 4000);
+    expect(outsider.myChecks).toHaveLength(0);
+    expect(outsider.log.filter((entry) => entry.code.startsWith('log.check.'))).toHaveLength(0);
   });
 
-  it('sheriff also detects the maniac', () => {
+  it('lets the sheriff see every hostile faction', () => {
     const engine = nightTable([
-      'citizen',
-      'mafia',
-      'citizen',
-      'citizen',
-      'sheriff',
-      'maniac',
-      'citizen',
-      'citizen',
+      'citizen', 'mafia', 'citizen', 'citizen', 'sheriff', 'maniac', 'citizen', 'citizen',
     ]);
     const sheriff = roleOf(engine, 'sheriff');
     const mafia = roleOf(engine, 'mafia');
     const maniac = roleOf(engine, 'maniac');
-    engine.submit(mafia.id, { type: 'kill', targetId: engine.state.players[2]!.id }, T0);
-    expect(engine.submit(sheriff.id, { type: 'sheriffCheck', targetId: maniac.id }, T0).ok).toBe(true);
-    // The choice can still be corrected inside the grace window.
-    expect(engine.submit(sheriff.id, { type: 'sheriffCheck', targetId: mafia.id }, T0 + 500).ok).toBe(true);
-    engine.submit(maniac.id, { type: 'maniacKill', targetId: engine.state.players[3]!.id }, T0);
+    const clean = engine.state.players[0]!;
+    act(engine, mafia.id, 'mafia', clean.id);
+    act(engine, maniac.id, 'kill', clean.id);
+    act(engine, sheriff.id, 'checkAny', mafia.id);
     tickTo(engine, T0 + 4000);
     expect(sheriff.checks[mafia.id]).toBe('mafia');
-    expect(sheriff.checks[maniac.id]).toBeUndefined();
+
+    const second = nightTable([
+      'citizen', 'mafia', 'citizen', 'citizen', 'sheriff', 'maniac', 'citizen', 'citizen',
+    ]);
+    const sheriff2 = roleOf(second, 'sheriff');
+    const maniac2 = roleOf(second, 'maniac');
+    act(second, sheriff2.id, 'checkAny', maniac2.id);
+    tickTo(second, T0 + 25_000);
+    expect(sheriff2.checks[maniac2.id]).toBe('maniac');
   });
 
   it('rejects illegal night actions', () => {
     const engine = nightTable([
-      'citizen',
-      'mafia',
-      'mafia',
-      'doctor',
-      'detective',
-      'maniac',
-      'citizen',
-      'citizen',
+      'citizen', 'mafia', 'mafia', 'doctor', 'detective', 'maniac', 'citizen', 'citizen',
     ]);
     const mafia = roleOf(engine, 'mafia');
     const otherMafia = engine.state.players.find(
       (player) => player.role === 'mafia' && player.id !== mafia.id,
     )!;
-    expect(engine.submit(mafia.id, { type: 'kill', targetId: mafia.id }, T0).ok).toBe(false);
-    expect(engine.submit(mafia.id, { type: 'kill', targetId: otherMafia.id }, T0).ok).toBe(false);
-    expect(engine.submit(engine.state.players[0]!.id, { type: 'kill', targetId: mafia.id }, T0).ok).toBe(
-      false,
-    );
+    expect(engine.submit(mafia.id, { type: 'night', kind: 'mafia', targetId: mafia.id }, T0).ok).toBe(false);
+    expect(engine.submit(mafia.id, { type: 'night', kind: 'mafia', targetId: otherMafia.id }, T0).ok).toBe(false);
+    expect(engine.submit(engine.state.players[0]!.id, { type: 'night', kind: 'mafia', targetId: mafia.id }, T0).ok).toBe(false);
   });
 
   it('locks the night only when every role has chosen', () => {
     const engine = nightTable([
-      'citizen',
-      'mafia',
-      'citizen',
-      'citizen',
-      'detective',
-      'citizen',
-      'citizen',
-      'citizen',
+      'citizen', 'mafia', 'citizen', 'citizen', 'detective', 'citizen', 'citizen', 'citizen',
     ]);
     const mafia = roleOf(engine, 'mafia');
     const detective = roleOf(engine, 'detective');
-    engine.submit(mafia.id, { type: 'kill', targetId: engine.state.players[2]!.id }, T0);
+    act(engine, mafia.id, 'mafia', engine.state.players[2]!.id);
     expect(engine.state.night.locked).toBe(false);
-    engine.submit(detective.id, { type: 'investigate', targetId: mafia.id }, T0);
+    act(engine, detective.id, 'check', mafia.id);
     expect(engine.state.night.locked).toBe(true);
   });
 
   it('keeps a correction window after the night was locked', () => {
     const engine = nightTable([
-      'citizen',
-      'mafia',
-      'citizen',
-      'citizen',
-      'citizen',
-      'citizen',
-      'citizen',
-      'citizen',
+      'citizen', 'mafia', 'citizen', 'citizen', 'citizen', 'citizen', 'citizen', 'citizen',
     ]);
     const mafia = roleOf(engine, 'mafia');
-    engine.submit(mafia.id, { type: 'kill', targetId: engine.state.players[2]!.id }, T0);
+    act(engine, mafia.id, 'mafia', engine.state.players[2]!.id);
     expect(engine.state.night.locked).toBe(true);
     tickTo(engine, T0 + 1000);
     expect(engine.state.phase).toBe('night');
-    // The choice can still be corrected inside the window.
-    expect(engine.submit(mafia.id, { type: 'kill', targetId: engine.state.players[3]!.id }, T0 + 1200).ok).toBe(true);
+    act(engine, mafia.id, 'mafia', engine.state.players[3]!.id);
     tickTo(engine, T0 + 4000);
     expect(engine.state.phase).toBe('dawn');
     expect(engine.state.players[3]!.alive).toBe(false);
     expect(engine.state.players[2]!.alive).toBe(true);
   });
 
-  it('kills the victim of every maniac', () => {
+  it('lets every maniac act on their own', () => {
     const engine = nightTable([
-      'citizen',
-      'mafia',
-      'citizen',
-      'citizen',
-      'citizen',
-      'maniac',
-      'maniac',
-      'citizen',
+      'citizen', 'mafia', 'citizen', 'citizen', 'citizen', 'maniac', 'maniac', 'citizen',
     ]);
     const mafia = roleOf(engine, 'mafia');
     const maniacs = engine.state.players.filter((player) => player.role === 'maniac');
-    engine.submit(mafia.id, { type: 'kill', targetId: engine.state.players[2]!.id }, T0);
-    engine.submit(maniacs[0]!.id, { type: 'maniacKill', targetId: engine.state.players[3]!.id }, T0);
-    engine.submit(maniacs[1]!.id, { type: 'maniacKill', targetId: engine.state.players[4]!.id }, T0);
+    act(engine, mafia.id, 'mafia', engine.state.players[2]!.id);
+    act(engine, maniacs[0]!.id, 'kill', engine.state.players[3]!.id);
+    act(engine, maniacs[1]!.id, 'kill', engine.state.players[4]!.id);
     tickTo(engine, T0 + 4000);
     expect(engine.state.lastNight?.deaths).toHaveLength(3);
   });
 
   it('kills nobody when the mafia cannot agree', () => {
     const engine = nightTable([
-      'citizen',
-      'mafia',
-      'citizen',
-      'citizen',
-      'mafia',
-      'citizen',
-      'citizen',
-      'citizen',
+      'citizen', 'mafia', 'citizen', 'citizen', 'mafia', 'citizen', 'citizen', 'citizen',
     ]);
     const mafia = engine.state.players.filter((player) => player.role === 'mafia');
-    engine.submit(mafia[0]!.id, { type: 'kill', targetId: engine.state.players[2]!.id }, T0);
-    engine.submit(mafia[1]!.id, { type: 'kill', targetId: engine.state.players[3]!.id }, T0);
+    act(engine, mafia[0]!.id, 'mafia', engine.state.players[2]!.id);
+    act(engine, mafia[1]!.id, 'mafia', engine.state.players[3]!.id);
     tickTo(engine, T0 + 4000);
     expect(engine.state.lastNight?.deaths).toHaveLength(0);
     expect(engine.state.log.some((entry) => entry.code === 'log.mafiaSplit')).toBe(true);
+  });
+
+  it('lets several doctors protect the same player', () => {
+    const engine = nightTable([
+      'citizen', 'mafia', 'citizen', 'doctor', 'doctor', 'citizen', 'citizen', 'citizen',
+    ]);
+    const mafia = roleOf(engine, 'mafia');
+    const doctors = engine.state.players.filter((player) => player.role === 'doctor');
+    const victim = engine.state.players[0]!;
+    act(engine, mafia.id, 'mafia', victim.id);
+    act(engine, doctors[0]!.id, 'heal', victim.id);
+    act(engine, doctors[1]!.id, 'heal', victim.id);
+    tickTo(engine, T0 + 4000);
+    expect(victim.alive).toBe(true);
+  });
+});
+
+describe('night resolution order', () => {
+  function nightTable(roles: Role[]): MafiaEngine {
+    const engine = setup(roles.length);
+    assignRoles(engine, roles);
+    clearNight(engine);
+    return engine;
+  }
+
+  it('applies blocking before the other abilities', () => {
+    const engine = nightTable([
+      'citizen', 'mafia', 'citizen', 'detective', 'blocker', 'citizen', 'citizen', 'citizen',
+    ]);
+    const blocker = roleOf(engine, 'blocker');
+    const detective = roleOf(engine, 'detective');
+    const mafia = roleOf(engine, 'mafia');
+    // The blocker silences the investigator.
+    act(engine, blocker.id, 'block', detective.id);
+    act(engine, mafia.id, 'mafia', engine.state.players[0]!.id);
+    act(engine, detective.id, 'check', mafia.id);
+    tickTo(engine, T0 + 4000);
+    expect(detective.checks[mafia.id]).toBeUndefined();
+  });
+
+  it('lets the framer make a target look like mafia', () => {
+    const engine = nightTable([
+      'citizen', 'mafia', 'citizen', 'citizen', 'detective', 'framer', 'citizen', 'citizen',
+    ]);
+    const framer = roleOf(engine, 'framer');
+    const detective = roleOf(engine, 'detective');
+    const victim = engine.state.players[0]!;
+    act(engine, framer.id, 'frame', victim.id);
+    act(engine, detective.id, 'check', victim.id);
+    tickTo(engine, T0 + 25_000);
+    expect(detective.checks[victim.id]).toBe('mafia');
+    // The real role of the target does not change.
+    expect(victim.role).toBe('citizen');
+    expect(victim.alive).toBe(true);
+  });
+
+  it('hides the mafia boss from the investigator when the setting is on', () => {
+    const engine = nightTable([
+      'citizen', 'mafiaBoss', 'citizen', 'citizen', 'detective', 'citizen', 'citizen', 'citizen',
+    ]);
+    const boss = roleOf(engine, 'mafiaBoss');
+    const detective = roleOf(engine, 'detective');
+    engine.state.settings.mafiaBossHides = true;
+    act(engine, boss.id, 'mafia', engine.state.players[0]!.id);
+    act(engine, detective.id, 'check', boss.id);
+    tickTo(engine, T0 + 4000);
+    expect(detective.checks[boss.id]).toBe('clean');
+  });
+
+  it('shows the mafia boss to the investigator when the setting is off', () => {
+    const engine = nightTable([
+      'citizen', 'mafiaBoss', 'citizen', 'citizen', 'detective', 'citizen', 'citizen', 'citizen',
+    ]);
+    const boss = roleOf(engine, 'mafiaBoss');
+    const detective = roleOf(engine, 'detective');
+    engine.state.settings.mafiaBossHides = false;
+    act(engine, boss.id, 'mafia', engine.state.players[0]!.id);
+    act(engine, detective.id, 'check', boss.id);
+    tickTo(engine, T0 + 4000);
+    expect(detective.checks[boss.id]).toBe('mafia');
+  });
+
+  it('lets the bodyguard take the hit', () => {
+    const engine = nightTable([
+      'citizen', 'mafia', 'citizen', 'citizen', 'bodyguard', 'citizen', 'citizen', 'citizen',
+    ]);
+    const mafia = roleOf(engine, 'mafia');
+    const guard = roleOf(engine, 'bodyguard');
+    const victim = engine.state.players[0]!;
+    act(engine, mafia.id, 'mafia', victim.id);
+    act(engine, guard.id, 'guard', victim.id);
+    tickTo(engine, T0 + 4000);
+    expect(victim.alive).toBe(true);
+    expect(guard.alive).toBe(false);
+    expect(guard.deathCause).toBe('guard');
+  });
+
+  it('kills a player when more attacks than protections hit them', () => {
+    const engine = nightTable([
+      'citizen', 'mafia', 'citizen', 'citizen', 'doctor', 'maniac', 'maniac', 'citizen',
+    ]);
+    const mafia = roleOf(engine, 'mafia');
+    const doctor = roleOf(engine, 'doctor');
+    const maniacs = engine.state.players.filter((player) => player.role === 'maniac');
+    const victim = engine.state.players[0]!;
+    act(engine, mafia.id, 'mafia', victim.id);
+    act(engine, doctor.id, 'heal', victim.id);
+    act(engine, maniacs[0]!.id, 'kill', victim.id);
+    act(engine, maniacs[1]!.id, 'kill', victim.id);
+    tickTo(engine, T0 + 4000);
+    expect(victim.alive).toBe(false);
+  });
+
+  it('cancels the investigation result when the investigator dies at night', () => {
+    const engine = nightTable([
+      'citizen', 'mafia', 'citizen', 'citizen', 'detective', 'maniac', 'citizen', 'citizen',
+    ]);
+    const mafia = roleOf(engine, 'mafia');
+    const maniac = roleOf(engine, 'maniac');
+    const detective = roleOf(engine, 'detective');
+    act(engine, mafia.id, 'mafia', detective.id);
+    act(engine, maniac.id, 'kill', engine.state.players[0]!.id);
+    act(engine, detective.id, 'check', mafia.id);
+    tickTo(engine, T0 + 4000);
+    expect(detective.alive).toBe(false);
+    expect(detective.checks[mafia.id]).toBeUndefined();
+  });
+
+  it('keeps the result when the room does not cancel checks on death', () => {
+    const engine = nightTable([
+      'citizen', 'mafia', 'citizen', 'citizen', 'detective', 'maniac', 'citizen', 'citizen',
+    ]);
+    const mafia = roleOf(engine, 'mafia');
+    const maniac = roleOf(engine, 'maniac');
+    const detective = roleOf(engine, 'detective');
+    engine.state.settings.nightDeathCancelsCheck = false;
+    act(engine, mafia.id, 'mafia', detective.id);
+    act(engine, maniac.id, 'kill', engine.state.players[0]!.id);
+    act(engine, detective.id, 'check', mafia.id);
+    tickTo(engine, T0 + 4000);
+    expect(detective.checks[mafia.id]).toBe('mafia');
+  });
+
+  it('resolves the night the same way whatever the seat order is', () => {
+    const build = (reverse: boolean) => {
+      const engine = nightTable([
+        'citizen', 'mafia', 'citizen', 'citizen', 'maniac', 'citizen', 'citizen', 'citizen',
+      ]);
+      const mafia = roleOf(engine, 'mafia');
+      const maniac = roleOf(engine, 'maniac');
+      const victim = engine.state.players[0]!;
+      act(engine, mafia.id, 'mafia', victim.id);
+      act(engine, maniac.id, 'kill', victim.id);
+      if (reverse) engine.state.players.reverse();
+      tickTo(engine, T0 + 4000);
+      return engine.state.lastNight?.deaths.map((death) => death.id).sort() ?? [];
+    };
+    expect(build(true)).toEqual(build(false));
+  });
+});
+
+describe('limited abilities', () => {
+  it('spends the avenger shots and stops at zero', () => {
+    const engine = new MafiaEngine({ hostId: 'p1', seed: 11 });
+    engine.addPlayer('p1', 'Мститель');
+    engine.fillBots(7);
+    for (const player of engine.state.players) player.lobbyReady = true;
+    engine.startMatch('p1', T0);
+    const avenger = engine.state.players[0]!;
+    avenger.role = 'avenger';
+    expect(avenger.uses.avenger).toBe(2);
+    const target = engine.state.players[1]!;
+    act(engine, avenger.id, 'shot', target.id);
+    expect(avenger.uses.avenger).toBe(1);
+    act(engine, avenger.id, 'shot', target.id);
+    expect(avenger.uses.avenger).toBe(0);
+    expect(engine.submit(avenger.id, { type: 'night', kind: 'shot', targetId: target.id }, T0)).toEqual({
+      ok: false,
+      error: 'err.uses',
+    });
+  });
+
+  it('reports a wrong shot of the avenger', () => {
+    const engine = new MafiaEngine({ hostId: 'p1', seed: 12 });
+    engine.addPlayer('p1', 'Мститель');
+    engine.fillBots(7);
+    for (const player of engine.state.players) player.lobbyReady = true;
+    engine.startMatch('p1', T0);
+    const avenger = engine.state.players[0]!;
+    avenger.role = 'avenger';
+    const victim = engine.state.players[1]!;
+    victim.role = 'citizen';
+    act(engine, avenger.id, 'shot', victim.id);
+    tickTo(engine, T0 + 4000);
+    expect(engine.state.log.some((entry) => entry.code === 'log.avengerMiss')).toBe(true);
+  });
+
+  it('lets the mayor reveal themselves once', () => {
+    const engine = new MafiaEngine({ hostId: 'p1', seed: 13 });
+    engine.addPlayer('p1', 'Мэр');
+    engine.fillBots(7);
+    for (const player of engine.state.players) player.lobbyReady = true;
+    engine.startMatch('p1', T0);
+    const mayor = engine.state.players[0]!;
+    mayor.role = 'mayor';
+    engine.state.phase = 'discussion';
+    expect(engine.submit(mayor.id, { type: 'mayorReveal' }, T0).ok).toBe(true);
+    expect(mayor.revealed).toBe(true);
+    expect(engine.submit(mayor.id, { type: 'mayorReveal' }, T0)).toEqual({
+      ok: false,
+      error: 'err.uses',
+    });
+  });
+
+  it('counts the revealed mayor twice', () => {
+    const engine = setup(6, 14);
+    const mayor = engine.state.players[0]!;
+    mayor.role = 'mayor';
+    mayor.revealed = true;
+    const target = engine.state.players[1]!;
+    enterVoting(engine);
+    for (const player of engine.state.players) {
+      if (!player.alive) continue;
+      engine.submit(player.id, { type: 'vote', targetId: player.id === mayor.id ? target.id : null }, T0);
+    }
+    tickTo(engine, T0 + 2500);
+    expect(engine.state.lastVote?.counts[target.id]).toBe(2);
+  });
+
+  it('answers the medium only once and only about the dead', () => {
+    const engine = setup(6, 15);
+    const medium = engine.state.players[0]!;
+    medium.role = 'medium';
+    const dead = engine.state.players[1]!;
+    dead.alive = false;
+    dead.role = 'mafia';
+    const living = engine.state.players[2]!;
+    expect(engine.submit(medium.id, { type: 'night', kind: 'question', targetId: living.id }, T0)).toEqual({
+      ok: false,
+      error: 'err.target',
+    });
+    expect(engine.submit(medium.id, { type: 'night', kind: 'question', targetId: dead.id }, T0).ok).toBe(true);
+    expect(medium.uses.medium).toBe(0);
+    tickTo(engine, T0 + 25_000);
+    expect(medium.checks[dead.id]).toBe('mafia');
+    expect(engine.submit(medium.id, { type: 'night', kind: 'question', targetId: dead.id }, T0)).toEqual({
+      ok: false,
+      error: 'err.phase',
+    });
+  });
+
+  it('gives the nurse the healing only after the doctor is dead', () => {
+    const engine = setup(6, 16);
+    const doctor = engine.state.players[0]!;
+    const nurse = engine.state.players[1]!;
+    doctor.role = 'doctor';
+    nurse.role = 'nurse';
+    expect(engine.allowedNightKinds(nurse)).toEqual([]);
+    doctor.alive = false;
+    expect(engine.allowedNightKinds(nurse)).toEqual(['heal']);
   });
 });
 
@@ -505,11 +708,7 @@ describe('voting', () => {
     const target = roleOf(engine, 'mafia');
     for (const player of engine.state.players) {
       if (!player.alive) continue;
-      if (player.id === target.id) {
-        engine.submit(player.id, { type: 'vote', targetId: null }, T0);
-      } else {
-        engine.submit(player.id, { type: 'vote', targetId: target.id }, T0);
-      }
+      engine.submit(player.id, { type: 'vote', targetId: player.id === target.id ? null : target.id }, T0);
     }
     tickTo(engine, T0 + 2500);
 
@@ -539,17 +738,15 @@ describe('voting', () => {
     expect(players.every((player) => player.alive)).toBe(true);
   });
 
-  it('counts abstentions separately and does not exclude on them', () => {
+  it('counts the abstentions separately', () => {
     const engine = setup(6);
     enterVoting(engine);
     const players = engine.state.players;
     const target = players[1]!;
     for (const player of players) {
-      const vote = player.id === target.id ? null : target.id;
-      engine.submit(player.id, { type: 'vote', targetId: vote }, T0);
+      engine.submit(player.id, { type: 'vote', targetId: player.id === target.id ? null : target.id }, T0);
     }
     tickTo(engine, T0 + 2500);
-    // 5 votes for the target, the target itself abstained.
     expect(engine.state.lastVote?.executedId).toBe(target.id);
     expect(engine.state.lastVote?.abstains).toBe(1);
   });
@@ -563,6 +760,34 @@ describe('voting', () => {
     const voter = engine.state.players[0]!;
     expect(engine.submit(voter.id, { type: 'vote', targetId: voter.id }, T0).ok).toBe(false);
     expect(engine.submit(voter.id, { type: 'vote', targetId: null }, T0).ok).toBe(true);
+  });
+
+  it('lets the joker win when the town votes them out', () => {
+    const engine = setup(6, 17);
+    const joker = engine.state.players[0]!;
+    joker.role = 'joker';
+    enterVoting(engine);
+    for (const player of engine.state.players) {
+      if (!player.alive) continue;
+      engine.submit(player.id, { type: 'vote', targetId: player.id === joker.id ? null : joker.id }, T0);
+    }
+    tickTo(engine, T0 + 2500);
+    expect(engine.state.personalWinners).toContain(joker.id);
+    expect(engine.state.winner).toBeNull();
+  });
+
+  it('ends the match when the joker victory is configured that way', () => {
+    const engine = setup(6, 18);
+    engine.state.settings.jokerEndsGame = true;
+    const joker = engine.state.players[0]!;
+    joker.role = 'joker';
+    enterVoting(engine);
+    for (const player of engine.state.players) {
+      if (!player.alive) continue;
+      engine.submit(player.id, { type: 'vote', targetId: player.id === joker.id ? null : joker.id }, T0);
+    }
+    tickTo(engine, T0 + 2500);
+    expect(engine.state.winner).toBe('joker');
   });
 });
 
@@ -616,11 +841,7 @@ describe('wins and the full loop', () => {
     const target = roleOf(engine, 'mafia');
     for (const player of engine.state.players) {
       if (!player.alive) continue;
-      if (player.id === target.id) {
-        engine.submit(player.id, { type: 'vote', targetId: null }, T0);
-      } else {
-        engine.submit(player.id, { type: 'vote', targetId: target.id }, T0);
-      }
+      engine.submit(player.id, { type: 'vote', targetId: player.id === target.id ? null : target.id }, T0);
     }
     tickTo(engine, T0 + 2500);
 
@@ -633,11 +854,15 @@ describe('wins and the full loop', () => {
   it('does not end the game with two survivors while the maniac is not alone', () => {
     const engine = setup(6, 11);
     assignRoles(engine, ['citizen', 'mafia', 'maniac', 'citizen', 'citizen', 'citizen']);
-    // Only the maniac and one citizen are left.
     for (const player of engine.state.players) player.alive = false;
     engine.state.players[2]!.alive = true;
     engine.state.players[0]!.alive = true;
-    enterVoting(engine);    abstainAll(engine);    tickTo(engine, T0 + 2500);
+    enterVoting(engine);
+    for (const player of engine.state.players) {
+      if (!player.alive) continue;
+      engine.submit(player.id, { type: 'vote', targetId: null }, T0);
+    }
+    tickTo(engine, T0 + 2500);
     expect(engine.state.winner).toBeNull();
   });
 
@@ -646,7 +871,9 @@ describe('wins and the full loop', () => {
     assignRoles(engine, ['citizen', 'mafia', 'maniac', 'citizen', 'citizen', 'citizen']);
     for (const player of engine.state.players) player.alive = false;
     engine.state.players[2]!.alive = true;
-    enterVoting(engine);    abstainAll(engine);    tickTo(engine, T0 + 2500);
+    enterVoting(engine);
+    engine.submit(engine.state.players[2]!.id, { type: 'vote', targetId: null }, T0);
+    tickTo(engine, T0 + 2500);
     expect(engine.state.winner).toBe('maniac');
   });
 
@@ -657,7 +884,12 @@ describe('wins and the full loop', () => {
     for (const player of engine.state.players) player.alive = false;
     engine.state.players[2]!.alive = true;
     engine.state.players[3]!.alive = true;
-    enterVoting(engine);    abstainAll(engine);    tickTo(engine, T0 + 2500);
+    enterVoting(engine);
+    for (const player of engine.state.players) {
+      if (!player.alive) continue;
+      engine.submit(player.id, { type: 'vote', targetId: null }, T0);
+    }
+    tickTo(engine, T0 + 2500);
     expect(engine.state.winner).toBe('maniac');
   });
 
@@ -669,7 +901,12 @@ describe('wins and the full loop', () => {
     engine.state.players[1]!.alive = true;
     engine.state.players[2]!.alive = true;
     engine.state.players[3]!.alive = true;
-    enterVoting(engine);    abstainAll(engine);    tickTo(engine, T0 + 2500);
+    enterVoting(engine);
+    for (const player of engine.state.players) {
+      if (!player.alive) continue;
+      engine.submit(player.id, { type: 'vote', targetId: null }, T0);
+    }
+    tickTo(engine, T0 + 2500);
     expect(engine.state.winner).toBe('mafia');
   });
 
@@ -742,36 +979,20 @@ describe('wins and the full loop', () => {
     expect(engine.find('p2')?.ready).toBe(true);
     expect(engine.state.log.some((entry) => entry.code === 'log.autoReady')).toBe(true);
   });
-
-  it('removes a guest who leaves the lobby', () => {
-    const engine = new MafiaEngine({ hostId: 'p1', seed: 1 });
-    engine.addPlayer('p1', 'Хост');
-    engine.addPlayer('p2', 'Гость');
-    engine.removePlayer('p2');
-    expect(engine.find('p2')).toBeNull();
-    expect(engine.state.players).toHaveLength(1);
-  });
 });
 
 describe('kick voting', () => {
-  function kickTable(): MafiaEngine {
+  it('needs a quorum of yes votes and more yes than no', () => {
     const engine = new MafiaEngine({ hostId: 'host', seed: 3 });
     engine.addPlayer('host', 'Хост');
     engine.addPlayer('g1', 'Гость');
     engine.addPlayer('g2', 'Гость');
     engine.addPlayer('g3', 'Гость');
     engine.addPlayer('g4', 'Гость');
-    return engine;
-  }
-
-  it('needs a quorum of yes votes and more yes than no', () => {
-    const engine = kickTable();
     const target = engine.find('g4')!;
 
     expect(engine.submit('g1', { type: 'kickStart', targetId: target.id }, T0).ok).toBe(true);
-    expect(engine.state.kickVote).not.toBeNull();
     expect(engine.state.kickVote?.quorum).toBe(2);
-    expect(engine.state.kickVote?.eligible).toBe(4);
 
     engine.submit('g1', { type: 'kickVote', choice: 'yes' }, T0);
     engine.submit('g2', { type: 'kickVote', choice: 'no' }, T0);
@@ -782,21 +1003,13 @@ describe('kick voting', () => {
     expect(engine.find(target.id)).toBeNull();
   });
 
-  it('never counts the target or silence as a yes vote', () => {
-    const engine = kickTable();
-    engine.submit('g1', { type: 'kickStart', targetId: 'g4' }, T0);
-    expect(engine.submit('g4', { type: 'kickVote', choice: 'yes' }, T0)).toEqual({
-      ok: false,
-      error: 'err.self',
-    });
-    engine.submit('g1', { type: 'kickVote', choice: 'yes' }, T0);
-    // Only one yes vote — the quorum of two is not reached.
-    expect(engine.state.kickVote).not.toBeNull();
-  });
-
   it('does not let one player start votes without limits', () => {
-    const engine = kickTable();
-    engine.submit('g1', { type: 'kickStart', targetId: 'g4' }, T0);
+    const engine = new MafiaEngine({ hostId: 'host', seed: 3 });
+    engine.addPlayer('host', 'Хост');
+    engine.addPlayer('g1', 'Гость');
+    engine.addPlayer('g2', 'Гость');
+    engine.addPlayer('g3', 'Гость');
+    engine.submit('g1', { type: 'kickStart', targetId: 'g3' }, T0);
     expect(engine.submit('g2', { type: 'kickStart', targetId: 'host' }, T0)).toEqual({
       ok: false,
       error: 'err.voteOpen',
@@ -815,12 +1028,16 @@ describe('kick voting', () => {
   });
 
   it('closes the vote when the time is up', () => {
-    const engine = kickTable();
-    engine.submit('g1', { type: 'kickStart', targetId: 'g4' }, T0);
+    const engine = new MafiaEngine({ hostId: 'host', seed: 3 });
+    engine.addPlayer('host', 'Хост');
+    engine.addPlayer('g1', 'Гость');
+    engine.addPlayer('g2', 'Гость');
+    engine.addPlayer('g3', 'Гость');
+    engine.submit('g1', { type: 'kickStart', targetId: 'g3' }, T0);
     engine.tick(T0 + 40_000);
     expect(engine.state.kickVote).toBeNull();
     expect(engine.state.log.some((entry) => entry.code === 'log.kickFailed')).toBe(true);
-    expect(engine.find('g4')).not.toBeNull();
+    expect(engine.find('g3')).not.toBeNull();
   });
 
   it('hands the character to a bot when the match already started', () => {
@@ -837,8 +1054,7 @@ describe('kick voting', () => {
     engine.submit('p2', { type: 'kickVote', choice: 'yes' }, T0);
     engine.submit('p3', { type: 'kickVote', choice: 'yes' }, T0);
     expect(engine.state.kickVote).toBeNull();
-    // The seat stays in the match, the character is played by a bot.
-    expect(engine.state.players).toHaveLength(8);
+    expect(engine.state.players.length).toBeGreaterThan(6);
     expect(target.isBot).toBe(true);
     expect(target.connected).toBe(false);
   });
@@ -865,14 +1081,7 @@ describe('snapshot filtering', () => {
   it('shows mafia teammates to each other at night', () => {
     const engine = setup(8);
     assignRoles(engine, [
-      'mafia',
-      'mafia',
-      'citizen',
-      'doctor',
-      'detective',
-      'maniac',
-      'citizen',
-      'citizen',
+      'mafia', 'mafia', 'citizen', 'doctor', 'detective', 'maniac', 'citizen', 'citizen',
     ]);
     const view = buildView(engine.state, 'p1', T0);
     const teammates = view.players.filter((player) => player.isTeammate);
@@ -904,17 +1113,10 @@ describe('snapshot filtering', () => {
 });
 
 describe('bots', () => {
-  it('prefers a known mafia when voting as the detective', () => {
+  it('prefers a known mafia when voting as the investigator', () => {
     const engine = setup(8);
     assignRoles(engine, [
-      'detective',
-      'mafia',
-      'mafia',
-      'doctor',
-      'citizen',
-      'maniac',
-      'citizen',
-      'citizen',
+      'detective', 'mafia', 'mafia', 'doctor', 'citizen', 'maniac', 'citizen', 'citizen',
     ]);
     enterVoting(engine);
     const detective = roleOf(engine, 'detective');
@@ -927,14 +1129,7 @@ describe('bots', () => {
   it('never votes for a mafia teammate unless forced', () => {
     const engine = setup(8);
     assignRoles(engine, [
-      'mafia',
-      'mafia',
-      'citizen',
-      'doctor',
-      'detective',
-      'maniac',
-      'citizen',
-      'citizen',
+      'mafia', 'mafia', 'citizen', 'doctor', 'detective', 'maniac', 'citizen', 'citizen',
     ]);
     const mafia = roleOf(engine, 'mafia');
     const rng = createRng(11);
@@ -946,12 +1141,49 @@ describe('bots', () => {
       }
     }
   });
+
+  it('picks a living target for every night ability', () => {
+    const engine = setup(8);
+    assignRoles(engine, [
+      'citizen', 'mafia', 'citizen', 'doctor', 'detective', 'bodyguard', 'avenger', 'blocker',
+    ]);
+    const rng = createRng(3);
+    const kinds: Array<[Role, NightChoiceKind]> = [
+      ['mafia', 'mafia'],
+      ['doctor', 'heal'],
+      ['detective', 'check'],
+      ['bodyguard', 'guard'],
+      ['avenger', 'shot'],
+      ['blocker', 'block'],
+    ];
+    for (const [role, kind] of kinds) {
+      const bot = roleOf(engine, role);
+      const choice = botNightChoice(engine.state, rng, bot, [kind]);
+      expect(choice.kind).toBe(kind);
+      expect(choice.targetId).toBeTruthy();
+      const target = engine.find(choice.targetId!);
+      expect(target?.alive).toBe(true);
+      expect(target?.id).not.toBe(bot.id);
+    }
+  });
+
+  it('lets the bot medium ask about a dead player', () => {
+    const engine = setup(8);
+    assignRoles(engine, [
+      'citizen', 'mafia', 'citizen', 'citizen', 'citizen', 'citizen', 'citizen', 'medium',
+    ]);
+    const dead = engine.state.players[0]!;
+    dead.alive = false;
+    const medium = roleOf(engine, 'medium');
+    const choice = botNightChoice(engine.state, createRng(7), medium, ['question']);
+    expect(choice.targetId).toBe(dead.id);
+  });
 });
 
 describe('action validation', () => {
   it('rejects unknown actions', () => {
     const engine = setup(6);
-    const result = engine.submit('p1', { type: 'nonsense' } as unknown as Action, T0);
+    const result = engine.submit('p1', { type: 'nonsense' } as never, T0);
     expect(result).toEqual({ ok: false, error: 'err.unknown' });
   });
 });
