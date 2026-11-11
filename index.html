@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0a0b0e" />
+    <meta name="color-scheme" content="dark" />
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+    <link rel="preload" as="font" type="font/woff2" crossorigin href="./fonts/cormorant-garamond-normal-600-cyr.woff2" />
+    <link rel="preload" as="font" type="font/woff2" crossorigin href="./fonts/inter-normal-400-600-cyr.woff2" />
+    <meta
+      name="description"
+      content="BlackTec Mafia — нуарная социальная игра на 6–12 человек. Играйте с ботами или с друзьями по ссылке прямо в браузере."
+    />
+    <title>BlackTec Mafia — Night Council</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        min-height: 100%;
+        background: #0a0b0e;
+        color: #e8e1d2;
+      }
+      #boot {
+        position: fixed;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        background: radial-gradient(60% 50% at 50% 40%, #16181f 0%, #0a0b0e 70%);
+        font-family: Georgia, 'Times New Roman', serif;
+        letter-spacing: 0.28em;
+        text-transform: uppercase;
+        font-size: 13px;
+        color: #8e8575;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <div id="boot">Night Council</div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

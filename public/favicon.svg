@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs>
+    <radialGradient id="felt" cx="50%" cy="38%" r="70%">
+      <stop offset="0%" stop-color="#1a2a20" />
+      <stop offset="60%" stop-color="#0d1712" />
+      <stop offset="100%" stop-color="#06090a" />
+    </radialGradient>
+  </defs>
+  <rect width="64" height="64" rx="10" fill="#07080b" />
+  <circle cx="32" cy="32" r="25" fill="url(#felt)" stroke="#c9a15a" stroke-opacity="0.55" />
+  <circle cx="32" cy="32" r="21.5" fill="none" stroke="#c9a15a" stroke-opacity="0.22" stroke-dasharray="3 4" />
+  <path d="M32 13c-7.6 0-13.8 6-13.8 13.4 0 2.6.8 5 2.1 7l-3.6 3.4a1.2 1.2 0 0 0 .8 2.1h29a1.2 1.2 0 0 0 .8-2.1l-3.6-3.4a13.3 13.3 0 0 0 2.1-7C45.8 19 39.6 13 32 13z" fill="#0a0c10" stroke="#e7c07a" stroke-width="1.6" />
+  <circle cx="26" cy="27" r="3.1" fill="#e7c07a" />
+  <circle cx="38" cy="27" r="3.1" fill="#e7c07a" />
+  <path d="M25 35.5c1.8 1.6 4.2 2.4 7 2.4s5.2-.8 7-2.4" fill="none" stroke="#b02a2f" stroke-width="2" stroke-linecap="round" />
+</svg>
