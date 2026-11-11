@@ -11,12 +11,26 @@ import type { RoomListing } from './rooms';
 const DEFAULT_BASE = import.meta.env.VITE_DISCOVERY_URL ?? '';
 const STORAGE_KEY = 'btcmafia.discovery';
 
+/**
+ * The address that was baked into the build.
+ * A loopback address only makes sense on the machine that runs the service,
+ * so a published build does not try to reach the visitor's localhost.
+ */
+function defaultBase(): string {
+  const base = DEFAULT_BASE.trim();
+  if (!base) return '';
+  const isLoopback = /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?(\/|$)/i.test(base);
+  if (!isLoopback) return base;
+  const host = typeof window === 'undefined' ? '' : window.location.hostname;
+  return host === '127.0.0.1' || host === 'localhost' ? base : '';
+}
+
 /** The discovery service address the player uses (stored per browser). */
 export function storedDiscoveryUrl(): string {
   try {
-    return window.localStorage.getItem(STORAGE_KEY) ?? DEFAULT_BASE;
+    return window.localStorage.getItem(STORAGE_KEY) ?? defaultBase();
   } catch {
-    return DEFAULT_BASE;
+    return defaultBase();
   }
 }
 

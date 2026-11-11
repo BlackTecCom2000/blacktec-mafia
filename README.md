@@ -178,6 +178,22 @@ npm run discovery    # http://127.0.0.1:8787 — список открытых �
 npm run discovery        # порт 8787, переменные PORT и HOST
 ```
 
+### Деплой
+
+* `main` — исходники проекта.
+* `gh-pages` — собранная версия, из неё GitHub Pages берёт сайт (сборку страницы
+  делают серверы GitHub, Actions для этого не нужен).
+* `.github/workflows/deploy.yml` — вариант сборки через Actions: проверка типов,
+  тесты и публикация. Включите его, когда Actions станет доступен
+  (Settings → Pages → Source → GitHub Actions).
+
+Обновить опубликованную версию из локальной сборки:
+
+```bash
+npm run build
+git subtree push --prefix dist origin gh-pages
+```
+
 ---
 
 ## Голосование за исключение
