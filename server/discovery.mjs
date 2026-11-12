@@ -49,11 +49,15 @@ function clampInt(value, min, max) {
 export function createDiscoveryServer(options = {}) {
   const staleMs = options.staleMs ?? STALE_MS;
   const rooms = new Map();
+  const relay = new Map();
 
   function prune() {
     const now = Date.now();
     for (const [code, room] of rooms) {
       if (now - room.updatedAt > staleMs) rooms.delete(code);
+    }
+    for (const [code, entry] of relay) {
+      if (now - entry.updatedAt > staleMs) relay.delete(code);
     }
   }
 
@@ -69,6 +73,66 @@ export function createDiscoveryServer(options = {}) {
     res.end(payload);
   }
 
+  function relayEntry(code) {
+    let entry = relay.get(code);
+    if (!entry) {
+      entry = { snapshot: null, actions: [], welcome: {}, updatedAt: 0 };
+      relay.set(code, entry);
+    }
+    return entry;
+  }
+
+  function handleRelay(req, res, url, code, role) {
+    if (role === 'close') {
+      relay.delete(code);
+      send(res, 200, { ok: true });
+      return;
+    }
+    if (req.method === 'GET') {
+      const entry = relay.get(code);
+      if (role === 'host') {
+        const actions = entry ? entry.actions.splice(0, entry.actions.length) : [];
+        send(res, 200, { actions });
+        return;
+      }
+      send(res, 200, {
+        snapshot: entry?.snapshot ?? null,
+        welcome: entry?.welcome ?? {},
+      });
+      return;
+    }
+    if (req.method === 'POST') {
+      let raw = '';
+      req.on('data', (chunk) => {
+        raw += chunk;
+        if (raw.length > 262144) req.destroy();
+      });
+      req.on('end', () => {
+        let payload = null;
+        try {
+          payload = JSON.parse(raw);
+        } catch {
+          send(res, 400, { error: 'bad-json' });
+          return;
+        }
+        const entry = relayEntry(code);
+        entry.updatedAt = Date.now();
+        if (role === 'host') {
+          entry.snapshot = payload?.snapshot ?? null;
+          if (payload?.welcome && typeof payload.welcome === 'object') {
+            Object.assign(entry.welcome, payload.welcome);
+          }
+        } else {
+          if (payload?.id) entry.actions.push({ id: String(payload.id), payload: payload.payload ?? null });
+          if (entry.actions.length > 200) entry.actions.splice(0, entry.actions.length - 200);
+        }
+        send(res, 200, { ok: true });
+      });
+      return;
+    }
+    send(res, 405, { error: 'method' });
+  }
+
   const server = createServer((req, res) => {
     if (req.method === 'OPTIONS') {
       send(res, 204, {});
@@ -76,6 +140,13 @@ export function createDiscoveryServer(options = {}) {
     }
 
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+
+    // The backup channel for networks without a direct peer connection.
+    const relayMatch = url.pathname.match(/^\/api\/relay\/([a-z0-9]+)(?:\/(host|guest|close))?$/i);
+    if (relayMatch) {
+      handleRelay(req, res, url, relayMatch[1].toLowerCase(), relayMatch[2]?.toLowerCase());
+      return;
+    }
 
     if (req.method === 'GET' && url.pathname === '/api/rooms') {
       prune();

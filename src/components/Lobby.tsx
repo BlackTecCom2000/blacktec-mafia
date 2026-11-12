@@ -3,7 +3,7 @@ import { compositionCounts, compositionTotal, standardComposition } from '../gam
 import type { Action, RoleComposition, RoomSettings } from '../game/types';
 import type { GameView } from '../game/view';
 import { roleName, useI18n } from '../i18n';
-import { inviteLink } from '../net/code';
+import { inviteLink, inviteLinkIsLocal } from '../net/code';
 import { CopyButton, monogram } from './ui';
 import { ArrowRightIcon, BanIcon, ExitIcon, SealIcon, UsersIcon } from './icons';
 import { LanguageToggle } from './ui';
@@ -95,6 +95,10 @@ export function Lobby({
               {t('lobby.connecting')}
             </p>
           )}
+
+          {inviteLinkIsLocal() ? (
+            <p className="lobby__warning">{t('lobby.localHint')}</p>
+          ) : null}
 
           <div className="seats">
             <div className="seats__head">

@@ -7,8 +7,9 @@
  * the participants are connected.
  */
 
-export type VoiceSignalKind = 'offer' | 'answer' | 'ice' | 'bye' | 'state';
+import { iceServers } from './peer';
 
+export type VoiceSignalKind = 'offer' | 'answer' | 'ice' | 'bye' | 'state';
 export interface VoiceSignal {
   kind: VoiceSignalKind;
   /** Peer the signal belongs to (the host uses it to route). */
@@ -30,9 +31,7 @@ export interface VoiceHandlers {
   onRemoteStream?: (peerId: string, stream: MediaStream) => void;
 }
 
-const ICE_SERVERS: RTCIceServer[] = [
-  { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
-];
+const ICE_SERVERS: RTCIceServer[] = [];
 
 /** Requests the microphone. Must be called from a user gesture. */
 export async function requestMicrophone(): Promise<MediaStream | null> {
@@ -158,7 +157,7 @@ export class VoicePeer {
 
   private ensureConnection(): RTCPeerConnection {
     if (this.pc) return this.pc;
-    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS.length ? ICE_SERVERS : iceServers() });
     this.pc = pc;
     pc.onicecandidate = (event) => {
       if (!event.candidate) return;

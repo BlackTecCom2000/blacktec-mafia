@@ -33,6 +33,45 @@ const PING_INTERVAL = 5_000;
 /** Failed join attempts (wrong password) allowed per connection. */
 export const MAX_JOIN_ATTEMPTS = 5;
 
+/** How long a guest waits for the direct peer connection. */
+export const CONNECT_TIMEOUT = 12_000;
+
+/**
+ * ICE servers for the direct peer connection.
+ *
+ * Without a TURN relay the connection only works when both peers can reach
+ * each other directly. Mobile networks and symmetric NAT block that, so the
+ * room stays unreachable. Configure a TURN server to make it reliable:
+ *
+ *   VITE_TURN_URL=turn:turn.example.com:3478
+ *   VITE_TURN_USERNAME=...
+ *   VITE_TURN_CREDENTIAL=...
+ *
+ * With `VITE_TURN=none` the public fallback relays are switched off.
+ */
+export function iceServers(): RTCIceServer[] {
+  const servers: RTCIceServer[] = [
+    { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
+  ];
+  const url = import.meta.env.VITE_TURN_URL;
+  if (url === 'none') return servers;
+  if (url) {
+    servers.push({
+      urls: url,
+      username: import.meta.env.VITE_TURN_USERNAME || undefined,
+      credential: import.meta.env.VITE_TURN_CREDENTIAL || undefined,
+    });
+    return servers;
+  }
+  // Public fallback relays: they help peers behind a symmetric NAT.
+  servers.push({
+    urls: ['turn:openrelay.metered.ca:80', 'turn:openrelay.metered.ca:443'],
+    username: 'openrelay',
+    credential: 'openrelay',
+  });
+  return servers;
+}
+
 function makeCode(): string {
   const alphabet = 'abcdefghjkmnpqrstuvwxyz23456789';
   const bytes = new Uint8Array(5);
@@ -302,13 +341,50 @@ export class GuestNet {
 
   async connect(code: string, name: string, password?: string | null): Promise<void> {
     this.guestName = name;
+    // One automatic retry: the first attempt can fail on a stale peer id or a
+    // momentary hiccup of the signalling server.
+    let lastError: Error | null = null;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        await this.connectOnce(code, password ?? null);
+        return;
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error('net.error');
+        const reason = lastError.message;
+        // A wrong password or a full room will not get better with a retry.
+        if (reason === 'net.wrongPassword' || reason === 'net.passwordRequired' || reason === 'net.full') {
+          throw lastError;
+        }
+        this.teardownConnection();
+      }
+    }
+    throw lastError ?? new Error('net.error');
+  }
+
+  /** Drops the current peer and connection so a retry starts clean. */
+  private teardownConnection(): void {
+    try {
+      this.conn?.close();
+    } catch {
+      /* ignore */
+    }
+    try {
+      this.peer?.destroy();
+    } catch {
+      /* ignore */
+    }
+    this.conn = null;
+    this.peer = null;
+  }
+
+  private async connectOnce(code: string, password: string | null): Promise<void> {
     const peer = await openPeer(undefined, 15000);
     this.peer = peer;
     const conn = peer.connect(PEER_PREFIX + code, { reliable: true });
     this.conn = conn;
 
     await new Promise<void>((resolve, reject) => {
-      const timer = window.setTimeout(() => reject(new Error('net.timeout')), 15000);
+      const timer = window.setTimeout(() => reject(new Error('net.p2p')), CONNECT_TIMEOUT);
       const cleanup = () => {
         window.clearTimeout(timer);
       };
@@ -430,7 +506,9 @@ export class GuestNet {
 
 function openPeer(id: string | undefined, timeoutMs: number): Promise<Peer> {
   return new Promise((resolve, reject) => {
-    const peer = id ? new Peer(id, { debug: 0 }) : new Peer({ debug: 0 });
+    const peer = id
+      ? new Peer(id, { debug: 0, config: { iceServers: iceServers() } })
+      : new Peer({ debug: 0, config: { iceServers: iceServers() } });
     let settled = false;
     const timer = window.setTimeout(() => {
       if (settled) return;

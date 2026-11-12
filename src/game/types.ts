@@ -192,6 +192,8 @@ export interface PlayerState {
   uses: Record<string, number>;
   /** The mayor revealed themselves in the open. */
   revealed: boolean;
+  /** The player came through the backup channel of the room service. */
+  relay?: boolean;
   /** The player the doctor protected the previous night. */
   lastHealTarget: string | null;
 }
