@@ -5,6 +5,7 @@ export const PEER_PREFIX = 'btcmafia1-';
 
 /** The public address of the site, used for the invite links of a local build. */
 const PUBLIC_URL = (import.meta.env.VITE_PUBLIC_URL ?? '').replace(/\/+$/, '');
+const SERVICE_KEY = 'btcmafia.discovery';
 
 export function normalizeCode(raw: string): string {
   return raw
@@ -22,16 +23,46 @@ export function isLocalHost(): boolean {
 }
 
 /**
+ * The address of the room service, remembered in the browser.
+ * The invite link carries it, so a guest gets the backup channel without
+ * configuring anything.
+ */
+export function storedServiceUrl(): string {
+  try {
+    return window.localStorage.getItem(SERVICE_KEY) ?? '';
+  } catch {
+    return '';
+  }
+}
+
+/**
  * The link a guest opens. On a local build the address would point at the
  * computer of the host, so the configured public address is used instead.
  */
 export function inviteLink(code: string): string {
   if (typeof window === 'undefined') return `#/join/${code}`;
+  const service = storedServiceUrl();
+  const query = service ? `?service=${encodeURIComponent(service)}` : '';
   if (isLocalHost() && PUBLIC_URL) {
-    return `${PUBLIC_URL}/#/join/${code}`;
+    return `${PUBLIC_URL}/#/join/${code}${query}`;
   }
   const { origin, pathname } = window.location;
-  return `${origin}${pathname}#/join/${code}`;
+  return `${origin}${pathname}#/join/${code}${query}`;
+}
+
+/** Reads the code and the service address from an invite link. */
+export function parseInviteHash(hash: string): { code: string; service: string } {
+  const match = hash.match(/^#\/join\/([a-z0-9]{1,12})(?:\?service=(.+))?$/i);
+  if (!match?.[1]) return { code: '', service: '' };
+  let service = '';
+  if (match[2]) {
+    try {
+      service = decodeURIComponent(match[2]);
+    } catch {
+      service = '';
+    }
+  }
+  return { code: match[1].toLowerCase(), service };
 }
 
 /** A warning for the host when the invite link only works locally. */

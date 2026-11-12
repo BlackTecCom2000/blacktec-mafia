@@ -5,6 +5,7 @@ import { Menu } from './components/Menu';
 import type { Action, RoomSettings } from './game/types';
 import { I18nProvider, loadEnglish, useI18n, type Locale } from './i18n';
 import { GameSession } from './session';
+import { parseInviteHash } from './net/code';
 
 const RoomSetup = lazy(() => import('./components/RoomSetup').then((m) => ({ default: m.RoomSetup })));
 const FindGame = lazy(() => import('./components/FindGame').then((m) => ({ default: m.FindGame })));
@@ -12,14 +13,18 @@ const FindGame = lazy(() => import('./components/FindGame').then((m) => ({ defau
 interface Route {
   mode: 'menu' | 'join';
   code: string;
+  /** The address of the room service from the invite link. */
+  service: string;
 }
 
 type Screen = 'menu' | 'custom' | 'find';
 
 function parseHash(): Route {
-  const match = window.location.hash.match(/^#\/join\/([a-z0-9]{1,12})/i);
-  if (match?.[1]) return { mode: 'join', code: match[1].toLowerCase() };
-  return { mode: 'menu', code: '' };
+  const invite = parseInviteHash(window.location.hash);
+  if (invite.code) {
+    return { mode: 'join', code: invite.code, service: invite.service };
+  }
+  return { mode: 'menu', code: '', service: '' };
 }
 
 function readStorage(key: string, fallback: string): string {
@@ -105,7 +110,7 @@ function Root() {
     session.leave();
     clearHash();
     setScreen('menu');
-    setRoute({ mode: 'menu', code: '' });
+    setRoute({ mode: 'menu', code: '', service: '' });
   };
 
   const startSolo = (playerName: string, count: number) => {
@@ -136,6 +141,8 @@ function Root() {
   const startJoin = (code: string, playerName: string, password: string | null) => {
     rememberName(playerName);
     setScreen('menu');
+    // The invite link can carry the address of the room service.
+    if (route.service) void session.setDiscoveryUrl(route.service);
     void session.joinRoom(code, playerName, password);
   };
 
