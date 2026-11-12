@@ -1,0 +1,32 @@
+{
+  // The room service of BlackTec Mafia: the catalog of open rooms and the
+  // backup channel for networks without a direct peer connection.
+  //
+  // Deploy:  npx wrangler deploy
+  // The public address of the worker is printed at the end.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "blacktec-rooms",
+  "main": "server/discovery-worker.mjs",
+  "compatibility_date": "2026-11-01",
+  "observability": {
+    "enabled": true
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "CATALOG",
+        "class_name": "Catalog"
+      },
+      {
+        "name": "ROOMS",
+        "class_name": "Room"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["Catalog", "Room"]
+    }
+  ]
+}

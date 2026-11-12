@@ -23,15 +23,30 @@ export function isLocalHost(): boolean {
 }
 
 /**
+ * The address of the room service that was baked into the build.
+ * A loopback address only makes sense on the machine that runs the service,
+ * so a published build never tries to reach the visitor's localhost.
+ */
+function bakedServiceUrl(): string {
+  const base = (import.meta.env.VITE_DISCOVERY_URL ?? '').trim().replace(/\/+$/, '');
+  if (!base) return '';
+  const isLoopback = /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?(\/|$)/i.test(base);
+  if (!isLoopback) return base;
+  const host = typeof window === 'undefined' ? '' : window.location.hostname;
+  return host === '127.0.0.1' || host === 'localhost' ? base : '';
+}
+
+/**
  * The address of the room service, remembered in the browser.
  * The invite link carries it, so a guest gets the backup channel without
- * configuring anything.
+ * configuring anything. When nothing was configured, the address of the build
+ * is used — a published build then works right away.
  */
 export function storedServiceUrl(): string {
   try {
-    return window.localStorage.getItem(SERVICE_KEY) ?? '';
+    return window.localStorage.getItem(SERVICE_KEY) || bakedServiceUrl();
   } catch {
-    return '';
+    return bakedServiceUrl();
   }
 }
 

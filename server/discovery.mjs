@@ -76,7 +76,7 @@ export function createDiscoveryServer(options = {}) {
   function relayEntry(code) {
     let entry = relay.get(code);
     if (!entry) {
-      entry = { snapshot: null, actions: [], welcome: {}, updatedAt: 0 };
+      entry = { views: {}, welcome: {}, voice: {}, errors: {}, actions: [], updatedAt: 0 };
       relay.set(code, entry);
     }
     return entry;
@@ -96,8 +96,10 @@ export function createDiscoveryServer(options = {}) {
         return;
       }
       send(res, 200, {
-        snapshot: entry?.snapshot ?? null,
+        views: entry?.views ?? {},
         welcome: entry?.welcome ?? {},
+        voice: entry?.voice ?? {},
+        errors: entry?.errors ?? {},
       });
       return;
     }
@@ -118,12 +120,19 @@ export function createDiscoveryServer(options = {}) {
         const entry = relayEntry(code);
         entry.updatedAt = Date.now();
         if (role === 'host') {
-          entry.snapshot = payload?.snapshot ?? null;
-          if (payload?.welcome && typeof payload.welcome === 'object') {
-            Object.assign(entry.welcome, payload.welcome);
-          }
+          // A personal view for every guest — the roles stay secret.
+          entry.views = payload?.views ?? {};
+          entry.welcome = payload?.welcome ?? {};
+          entry.voice = payload?.voice ?? {};
+          entry.errors = payload?.errors ?? {};
         } else {
-          if (payload?.id) entry.actions.push({ id: String(payload.id), payload: payload.payload ?? null });
+          if (payload?.id) {
+            entry.actions.push({
+              id: String(payload.id).slice(0, 80),
+              key: String(payload.key ?? '').slice(0, 40),
+              payload: payload.payload ?? null,
+            });
+          }
           if (entry.actions.length > 200) entry.actions.splice(0, entry.actions.length - 200);
         }
         send(res, 200, { ok: true });

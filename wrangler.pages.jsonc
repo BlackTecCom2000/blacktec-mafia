@@ -1,0 +1,14 @@
+{
+  // The game itself — a static site on Cloudflare (static assets of a worker).
+  //
+  // Build:  VITE_DISCOVERY_URL=<address of the worker> npm run build
+  // Deploy: npx wrangler deploy --config wrangler.pages.jsonc
+  // Result: https://blacktec-mafia.djaborov2000.workers.dev
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "blacktec-mafia",
+  "compatibility_date": "2026-11-01",
+  "assets": {
+    "directory": "./dist",
+    "not_found_handling": "single-page-application"
+  }
+}

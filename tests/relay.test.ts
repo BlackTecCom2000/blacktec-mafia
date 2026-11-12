@@ -31,11 +31,20 @@ afterAll(async () => {
 
 describe('the backup channel', () => {
   it('delivers the messages of the guest to the host', async () => {
-    await post('/api/relay/room1/guest', { id: 'm1', payload: { kind: 'join', key: 'k1', name: 'Гость' } });
+    await post('/api/relay/room1/guest', {
+      id: 'm1',
+      key: 'k1',
+      payload: { kind: 'join', name: 'Гость' },
+    });
     const pulled = await get('/api/relay/room1/host');
-    const actions = (pulled.actions ?? []) as Array<{ id: string; payload: { kind: string } }>;
+    const actions = (pulled.actions ?? []) as Array<{
+      id: string;
+      key: string;
+      payload: { kind: string };
+    }>;
     expect(actions).toHaveLength(1);
     expect(actions[0]?.id).toBe('m1');
+    expect(actions[0]?.key).toBe('k1');
     expect(actions[0]?.payload.kind).toBe('join');
 
     // The queue is emptied by the pull.
@@ -43,25 +52,36 @@ describe('the backup channel', () => {
     expect((again.actions ?? []) as unknown[]).toHaveLength(0);
   });
 
-  it('publishes the snapshot of the host for the guest', async () => {
-    const snapshot = { version: 7, phase: 'lobby' };
-    await post('/api/relay/room2/host', { snapshot, welcome: { k1: 'g1' } });
+  it('publishes a personal view for every guest', async () => {
+    const views = {
+      k1: { version: 7, phase: 'lobby', me: { role: 'mafia' } },
+      k2: { version: 7, phase: 'lobby', me: { role: 'citizen' } },
+    };
+    await post('/api/relay/room2/host', {
+      views,
+      welcome: { k1: 'g1', k2: 'g2' },
+      voice: {},
+      errors: {},
+    });
     const guest = await get('/api/relay/room2/guest');
-    expect(guest.snapshot).toEqual(snapshot);
-    expect(guest.welcome).toEqual({ k1: 'g1' });
+    const published = guest.views as Record<string, { me: { role: string } }>;
+    // Every guest sees its own role, not the role of the host.
+    expect(published.k1?.me.role).toBe('mafia');
+    expect(published.k2?.me.role).toBe('citizen');
+    expect(guest.welcome).toEqual({ k1: 'g1', k2: 'g2' });
   });
 
   it('keeps the rooms apart from each other', async () => {
-    await post('/api/relay/room3/host', { snapshot: { version: 1 } });
+    await post('/api/relay/room3/host', { views: { k1: { version: 1 } } });
     const other = await get('/api/relay/room4/guest');
-    expect(other.snapshot).toBeNull();
+    expect(Object.keys((other.views ?? {}) as Record<string, unknown>)).toHaveLength(0);
   });
 
   it('closes a room on request', async () => {
-    await post('/api/relay/room5/host', { snapshot: { version: 1 } });
+    await post('/api/relay/room5/host', { views: { k1: { version: 1 } } });
     await post('/api/relay/room5/close', {});
     const after = await get('/api/relay/room5/guest');
-    expect(after.snapshot).toBeNull();
+    expect(Object.keys((after.views ?? {}) as Record<string, unknown>)).toHaveLength(0);
   });
 
   it('never stores a password of a room', async () => {

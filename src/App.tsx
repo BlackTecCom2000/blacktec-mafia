@@ -5,7 +5,7 @@ import { Menu } from './components/Menu';
 import type { Action, RoomSettings } from './game/types';
 import { I18nProvider, loadEnglish, useI18n, type Locale } from './i18n';
 import { GameSession } from './session';
-import { parseInviteHash } from './net/code';
+import { parseInviteHash, storedServiceUrl } from './net/code';
 
 const RoomSetup = lazy(() => import('./components/RoomSetup').then((m) => ({ default: m.RoomSetup })));
 const FindGame = lazy(() => import('./components/FindGame').then((m) => ({ default: m.FindGame })));
@@ -85,7 +85,7 @@ function Root() {
   );
   const snapshot = useSyncExternalStore(subscribe, session.getSnapshot, session.getSnapshot);
   const [name, setName] = useState(() => readStorage('btcmafia.name', ''));
-  const [discoveryUrl, setDiscoveryUrl] = useState(() => readStorage('btcmafia.discovery', ''));
+  const [discoveryUrl, setDiscoveryUrl] = useState(() => storedServiceUrl());
 
   useEffect(() => {
     const onHashChange = () => setRoute(parseHash());

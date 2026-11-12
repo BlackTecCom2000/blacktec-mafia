@@ -2,6 +2,7 @@ import Peer, { type DataConnection } from 'peerjs';
 import type { Action } from '../game/types';
 import type { GameView } from '../game/view';
 import { PEER_PREFIX } from './code';
+import { errorMessage } from './errors';
 import type { VoiceSignal } from './voice';
 
 export type ClientMessage =
@@ -452,11 +453,8 @@ export class GuestNet {
       });
 
       peer.on('error', (error) => {
-        const type = (error as { type?: string }).type;
         cleanup();
-        if (type === 'peer-unavailable') reject(new Error('net.notFound'));
-        else if (type === 'network' || type === 'server-error') reject(new Error('net.server'));
-        else reject(new Error('net.error'));
+        reject(new Error(errorMessage(error)));
       });
     });
   }
@@ -535,18 +533,14 @@ function openPeer(id: string | undefined, timeoutMs: number): Promise<Peer> {
       if (settled) return;
       settled = true;
       window.clearTimeout(timer);
-      const type = (error as { type?: string }).type ?? '';
       try {
         peer.destroy();
       } catch {
         /* ignore */
       }
-      reject(new Error(type === 'unavailable-id' ? 'unavailable-id' : errorMessage(error)));
+      reject(new Error(errorMessage(error)));
     });
   });
 }
 
-function errorMessage(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  return 'net.error';
-}
+export { errorMessage } from './errors';

@@ -1,12 +1,12 @@
 import { MafiaEngine } from './game/engine';
 import { buildView, type GameView } from './game/view';
 import { MIN_PLAYERS, MAX_PLAYERS, type Action, type RoomSettings } from './game/types';
-import { normalizeCode } from './net/code';
+import { normalizeCode, storedServiceUrl } from './net/code';
 import { findQuickMatch, roomStatus, checkJoinAccess, type QuickMatchPrefs, type RoomListing } from './net/rooms';
 import type { Discovery } from './net/discovery';
 import { voiceAudience, voicePermission } from './net/voice-rules';
-import { RelayClient, type RelayPayload } from './net/relay';
-import type { VoiceHub } from './net/voice';
+import { RelayClient, type RelayPayload, type RelayVoice } from './net/relay';
+import type { VoiceHub, VoiceSignal } from './net/voice';
 import type { ClientMessage, GuestNet, HostNet } from './net/peer';
 
 export type SessionMode = 'solo' | 'host' | 'guest';
@@ -103,8 +103,14 @@ export class GameSession {
   /** Identifiers of the relay messages that were already applied. */
   private readonly appliedRelayActions = new Set<string>();
 
-  /** The seat of the guest that came through the backup channel. */
-  private relayGuestId: string | null = null;
+  /** The seats of the relay guests, by their key. */
+  private readonly relaySeats = new Map<string, string>();
+
+  /** The version of the state that was published last. */
+  private relayVersion = -1;
+
+  /** The moment of the last publication, so the room stays alive. */
+  private relayPublishedAt = 0;
 
   /** The key the guest uses on the backup channel. */
   private readonly relayKey = `r${Math.random().toString(36).slice(2, 10)}`;
@@ -120,6 +126,18 @@ export class GameSession {
 
   /** The answers of the host for the relay guests. */
   private readonly relayWelcome: Record<string, string> = {};
+
+  /** The last rejected action of every relay guest. */
+  private readonly relayErrors = new Map<string, string>();
+
+  /** The voice signals of the host for the relay guests, by their key. */
+  private readonly relayVoice = new Map<string, RelayVoice>();
+
+  /** The number of the last published voice signal. */
+  private relayVoiceSeq = 0;
+
+  /** The last voice signal the guest handled, by its key. */
+  private readonly relayVoiceSeen = new Map<string, number>();
 
   private speaking: Record<string, boolean> = {};
 
@@ -250,8 +268,14 @@ export class GameSession {
         isHost: true,
         sendToHost: () => undefined,
         sendToGuest: (peerId, message) => {
-          if (peerId === '__all__') this.hostNet?.broadcastVoice('host', message);
-          else this.hostNet?.sendVoice(peerId, message);
+          if (peerId === '__all__') {
+            this.hostNet?.broadcastVoice('host', message);
+            for (const key of this.relaySeats.keys()) this.queueRelayVoice(key, message);
+            return;
+          }
+          this.hostNet?.sendVoice(peerId, message);
+          const key = this.relayKeyOf(peerId);
+          if (key) this.queueRelayVoice(key, message);
         },
         onState: (peerId, publishing) => this.setSpeaking(peerId, publishing),
         onError: (message) => this.setVoiceError(message),
@@ -366,7 +390,14 @@ export class GameSession {
       if (this.snapshot.mode !== 'guest') return false;
       const message = error instanceof Error ? error.message : 'net.error';
       // The direct connection did not come through: use the backup channel.
-      if (message === 'net.p2p' || message === 'net.timeout' || message === 'net.error') {
+      // `net.server` means the signalling server is unreachable — the direct
+      // connection will not come through either.
+      if (
+        message === 'net.p2p' ||
+        message === 'net.timeout' ||
+        message === 'net.error' ||
+        message === 'net.server'
+      ) {
         this.fallBackToRelay(code);
         return false;
       }
@@ -472,12 +503,11 @@ export class GameSession {
   private startRelay(code: string, role: 'host' | 'guest'): void {
     const baseUrl = this.relayUrl();
     if (!baseUrl) return;
-    const relay = new RelayClient(baseUrl, code, role);
+    const relay = new RelayClient(baseUrl, code);
     this.relay = relay;
     if (role === 'guest') {
-      void relay.send(`${this.relayKey}:join`, {
+      void relay.send(this.relayKey, `${this.relayKey}:join`, {
         kind: 'join',
-        key: this.relayKey,
         name: this.guestName,
         password: this.guestPassword,
       });
@@ -486,29 +516,41 @@ export class GameSession {
     const tick = async () => {
       if (this.relay !== relay) return;
       if (role === 'host') {
-        const view = this.snapshot.view;
-        if (view) await relay.pushSnapshot(view, this.relayWelcome);
+        await this.publishRelay();
         const messages = await relay.pullMessages();
         for (const entry of messages) {
           if (!entry.payload || this.appliedRelayActions.has(entry.id)) continue;
           this.appliedRelayActions.add(entry.id);
           if (entry.payload.kind === 'join') {
-            this.handleRelayJoin(entry.payload);
+            this.handleRelayJoin(entry.key, entry.payload);
             continue;
           }
-          const playerId = this.relayGuestId;
+          const playerId = this.relaySeats.get(entry.key);
           if (!playerId || !this.engine) continue;
+          if (entry.payload.kind === 'voice') {
+            void this.voice?.handleSignal(entry.payload.signal);
+            continue;
+          }
           const result = this.engine.submit(playerId, entry.payload.action, Date.now());
           if (!result.ok && result.error) {
-            this.hostNet?.send(playerId, { t: 'actionError', error: result.error });
+            this.relayErrors.set(playerId, result.error);
           }
           this.push();
         }
       } else {
-        const { snapshot: view, welcome } = await relay.pull();
-        const myId = welcome[this.relayKey];
-        if (myId && !myId.startsWith('error:')) this.relayGuestId = myId;
-        if (view && view.version !== this.snapshot.view?.version) {
+        const state = await relay.pull();
+        const myId = state.welcome[this.relayKey];
+        const view = state.views[this.relayKey] ?? null;
+        const voice = state.voice[this.relayKey];
+        const error = state.errors[this.relayKey] ?? null;
+        if (voice && voice.seq > (this.relayVoiceSeen.get(this.relayKey) ?? 0)) {
+          this.relayVoiceSeen.set(this.relayKey, voice.seq);
+          void this.voice?.handleSignal(voice.signal);
+        }
+        if (view && (view.version !== this.snapshot.view?.version || myId !== this.snapshot.myId)) {
+          if (myId && !myId.startsWith('error:') && !this.voice) {
+            await this.ensureRelayVoice(myId);
+          }
           this.snapshot = {
             ...this.snapshot,
             view,
@@ -516,6 +558,10 @@ export class GameSession {
             error: myId?.startsWith('error:') ? myId.slice(6) : this.snapshot.error,
             myId: myId && !myId.startsWith('error:') ? myId : this.snapshot.myId,
           };
+          this.emit();
+        }
+        if (error && error !== this.snapshot.actionError) {
+          this.snapshot = { ...this.snapshot, actionError: error };
           this.emit();
         }
       }
@@ -527,37 +573,105 @@ export class GameSession {
     void tick();
   }
 
+  /**
+   * The host publishes a personal view for every guest of the backup channel.
+   * A guest sees only its own role — exactly as with a direct connection.
+   */
+  private async publishRelay(): Promise<void> {
+    const relay = this.relay;
+    const engine = this.engine;
+    if (!relay || !engine) return;
+    const now = Date.now();
+    const version = engine.state.version;
+    // The room stays alive with a heartbeat, the views are published when
+    // something changes.
+    if (version === this.relayVersion && now - this.relayPublishedAt < 3000) return;
+    this.relayVersion = version;
+    this.relayPublishedAt = now;
+
+    const views: Record<string, GameView> = {};
+    for (const [key, playerId] of this.relaySeats) {
+      views[key] = buildView(engine.state, playerId, now);
+    }
+    const errors: Record<string, string> = {};
+    for (const [key, playerId] of this.relaySeats) {
+      const error = this.relayErrors.get(playerId);
+      if (error) errors[key] = error;
+    }
+    const voice: Record<string, RelayVoice> = {};
+    for (const [key, entry] of this.relayVoice) {
+      if (this.relaySeats.has(key)) voice[key] = entry;
+    }
+    await relay.push({ views, welcome: { ...this.relayWelcome }, voice, errors });
+  }
+
   /** The host takes a guest that came through the backup channel. */
-  private handleRelayJoin(payload: Extract<RelayPayload, { kind: 'join' }>): void {
+  private handleRelayJoin(key: string, payload: Extract<RelayPayload, { kind: 'join' }>): void {
     if (!this.engine) return;
     if (this.engine.state.phase !== 'lobby') return;
-    const access = checkJoinAccess(this.engine.state.settings, this.password, payload.password);
-    if (access !== 'ok') {
-      this.relayWelcome[payload.key] = `error:${access}`;
+    const known = this.relaySeats.get(key);
+    if (known) {
+      // The guest repeats the request — it did not get the answer yet.
+      this.relayWelcome[key] = known;
       return;
     }
-    const existing = this.engine.state.players.find(
-      (player) => !player.isBot && player.relay && player.name === (payload.name || 'Гость'),
-    );
-    const player = existing ?? this.engine.addPlayer(`r${this.engine.state.players.length + 1}`, payload.name || 'Гость');
+    const access = checkJoinAccess(this.engine.state.settings, this.password, payload.password);
+    if (access !== 'ok') {
+      this.relayWelcome[key] = `error:${access}`;
+      return;
+    }
+    const player = this.engine.addPlayer(`r${this.engine.state.players.length + 1}`, payload.name || 'Гость');
     if (!player) return;
     player.relay = true;
     player.connected = true;
-    this.relayWelcome[payload.key] = player.id;
-    this.relayGuestId = player.id;
+    this.relaySeats.set(key, player.id);
+    this.relayWelcome[key] = player.id;
     this.engine.resetReadiness();
     this.push();
     this.publishRoom();
   }
 
+  /**
+   * The voice hub of a guest that came through the backup channel.
+   * The microphone works the same way, only the signals take another route.
+   */
+  private async ensureRelayVoice(selfId: string): Promise<void> {
+    if (this.voice) return;
+    const { VoiceHub } = await import('./net/voice');
+    this.voice = new VoiceHub({
+      selfId,
+      isHost: false,
+      sendToHost: (message) => {
+        const id = `${this.relayKey}:${this.relayCounter += 1}`;
+        void this.relay?.send(this.relayKey, id, { kind: 'voice', signal: message });
+      },
+      sendToGuest: () => undefined,
+      onState: (peerId, publishing) => this.setSpeaking(peerId, publishing),
+      onError: (message) => this.setVoiceError(message),
+      canPublish: () => this.canUseVoice(),
+      audienceOf: (peerId) => this.audienceOf(peerId),
+      guestIds: () => [],
+    });
+  }
+
+  /** The key of the relay guest with this seat. */
+  private relayKeyOf(playerId: string): string | null {
+    for (const [key, id] of this.relaySeats) {
+      if (id === playerId) return key;
+    }
+    return null;
+  }
+
+  /** Keeps a voice signal for a guest of the backup channel. */
+  private queueRelayVoice(key: string, signal: VoiceSignal): void {
+    this.relayVoiceSeq += 1;
+    this.relayVoice.set(key, { seq: this.relayVoiceSeq, signal });
+  }
+
   /** The address of the room service used for the backup channel. */
   private relayUrl(): string {
     if (this.snapshot.discoveryUrl) return this.snapshot.discoveryUrl;
-    try {
-      return window.localStorage.getItem('btcmafia.discovery') ?? '';
-    } catch {
-      return '';
-    }
+    return storedServiceUrl();
   }
 
   /** The guest switches to the backup channel when the direct connection fails. */
@@ -641,9 +755,9 @@ export class GameSession {
   dispatch(action: Action): void {
     if (this.snapshot.mode === 'guest') {
       // Over the backup channel the actions go through the room service.
-      if (this.relay && this.relayGuestId) {
+      if (this.relay) {
         const id = `${this.relayKey}:${this.relayCounter += 1}`;
-        void this.relay.send(id, { kind: 'action', action });
+        void this.relay.send(this.relayKey, id, { kind: 'action', action });
         return;
       }
       this.guestNet?.send(action);
