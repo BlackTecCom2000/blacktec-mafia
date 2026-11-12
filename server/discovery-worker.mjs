@@ -188,6 +188,7 @@ export class Room {
         welcome: entry.welcome ?? {},
         voice: entry.voice ?? {},
         errors: entry.errors ?? {},
+        updatedAt: entry.updatedAt ?? 0,
       });
     }
 
@@ -211,6 +212,10 @@ export class Room {
         entry.welcome = payload.welcome ?? {};
         entry.voice = payload.voice ?? {};
         entry.errors = payload.errors ?? {};
+        // Publishing and collecting in one request keeps the quota small.
+        const actions = entry.actions.splice(0, entry.actions.length);
+        await this.ctx.storage.put('relay', entry);
+        return json({ ok: true, actions });
       } else if (payload.id) {
         entry.actions.push({
           id: String(payload.id).slice(0, 80),
@@ -222,7 +227,15 @@ export class Room {
         }
       }
       await this.ctx.storage.put('relay', entry);
-      return json({ ok: true });
+      // The guest reads the state of the host in the same request.
+      return json({
+        ok: true,
+        views: entry.views ?? {},
+        welcome: entry.welcome ?? {},
+        voice: entry.voice ?? {},
+        errors: entry.errors ?? {},
+        updatedAt: entry.updatedAt ?? 0,
+      });
     }
 
     return json({ error: 'method' }, 405);

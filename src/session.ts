@@ -5,9 +5,18 @@ import { normalizeCode, storedServiceUrl } from './net/code';
 import { findQuickMatch, roomStatus, checkJoinAccess, type QuickMatchPrefs, type RoomListing } from './net/rooms';
 import type { Discovery } from './net/discovery';
 import { voiceAudience, voicePermission } from './net/voice-rules';
-import { RelayClient, type RelayPayload, type RelayVoice } from './net/relay';
+import { RelayClient, type RelayEntry, type RelayPayload, type RelayVoice } from './net/relay';
 import type { VoiceHub, VoiceSignal } from './net/voice';
 import type { ClientMessage, GuestNet, HostNet } from './net/peer';
+
+/** How often the backup channel is polled while guests are in the room. */
+const RELAY_FAST_MS = 3000;
+
+/** How often the host waits for a guest of the backup channel. */
+const RELAY_SLOW_MS = 5000;
+
+/** When the host published nothing for that long, it is gone. */
+const RELAY_HOST_GONE_MS = 30_000;
 
 export type SessionMode = 'solo' | 'host' | 'guest';
 export type SessionStatus = 'idle' | 'connecting' | 'ready' | 'error';
@@ -117,6 +126,9 @@ export class GameSession {
 
   /** The counter of the relay messages of this guest. */
   private relayCounter = 0;
+
+  /** The message of the guest that waits to be sent with the next request. */
+  private relayPending: RelayPayload | null = null;
 
   /** The name of the guest, used by the backup channel. */
   private guestName = '';
@@ -506,18 +518,21 @@ export class GameSession {
     const relay = new RelayClient(baseUrl, code);
     this.relay = relay;
     if (role === 'guest') {
-      void relay.send(this.relayKey, `${this.relayKey}:join`, {
+      // The request to join goes with the first request of the guest. It is
+      // repeated until the host answers with the seat.
+      this.relayPending = {
         kind: 'join',
         name: this.guestName,
         password: this.guestPassword,
-      });
+      };
     }
 
     const tick = async () => {
       if (this.relay !== relay) return;
+      // A hidden tab does not need the state of the room.
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
       if (role === 'host') {
-        await this.publishRelay();
-        const messages = await relay.pullMessages();
+        const messages = await this.publishRelay();
         for (const entry of messages) {
           if (!entry.payload || this.appliedRelayActions.has(entry.id)) continue;
           this.appliedRelayActions.add(entry.id);
@@ -537,8 +552,21 @@ export class GameSession {
           }
           this.push();
         }
+        // The state changed while the messages were processed — the guests get
+        // the new view in the same cycle.
+        if (this.engine && this.engine.state.version !== this.relayVersion) {
+          await this.publishRelay();
+        }
       } else {
-        const state = await relay.pull();
+        // The message of the guest goes with the request that reads the state
+        // of the host — one request per cycle instead of two.
+        const pending = this.relayPending;
+        const state = await relay.exchange(
+          this.relayKey,
+          pending ? `${this.relayKey}:${this.relayCounter += 1}` : null,
+          pending,
+        );
+        this.relayPending = null;
         const myId = state.welcome[this.relayKey];
         const view = state.views[this.relayKey] ?? null;
         const voice = state.voice[this.relayKey];
@@ -560,34 +588,62 @@ export class GameSession {
           };
           this.emit();
         }
+        // Until the host answers, the request to join is repeated.
+        if (!myId) {
+          this.relayPending = {
+            kind: 'join',
+            name: this.guestName,
+            password: this.guestPassword,
+          };
+        }
         if (error && error !== this.snapshot.actionError) {
           this.snapshot = { ...this.snapshot, actionError: error };
           this.emit();
         }
+        // The service does not answer — its quota may be used up.
+        if (relay.errorCount >= 3 && !this.snapshot.view) {
+          this.snapshot = { ...this.snapshot, status: 'error', error: 'net.serviceDown' };
+          this.emit();
+        }
+        // The host stopped publishing — it closed the room or the tab.
+        if (state.updatedAt && Date.now() - state.updatedAt > RELAY_HOST_GONE_MS) {
+          this.snapshot = { ...this.snapshot, status: 'error', error: 'net.hostLeft' };
+          this.emit();
+          this.stopRelay();
+        }
       }
     };
 
-    this.relayTimer = window.setInterval(() => {
-      void tick();
-    }, 500);
-    void tick();
+    // The service has a small daily quota, so the room is polled as rarely
+    // as possible: fast while guests of the backup channel are in the room,
+    // slow while the host only waits for one.
+    const schedule = () => {
+      if (this.relay !== relay) return;
+      const fast = role === 'guest' || this.relaySeats.size > 0;
+      const base = fast ? RELAY_FAST_MS : RELAY_SLOW_MS;
+      // When the service complains (a used up quota), the room waits longer.
+      const delay = Math.max(base, relay.delay);
+      this.relayTimer = window.setTimeout(() => {
+        void tick().finally(schedule);
+      }, delay);
+    };
+    void tick().finally(schedule);
   }
 
   /**
-   * The host publishes a personal view for every guest of the backup channel.
+   * The host publishes a personal view for every guest of the backup channel
+   * and collects the messages of the guests in one request.
    * A guest sees only its own role — exactly as with a direct connection.
    */
-  private async publishRelay(): Promise<void> {
+  private async publishRelay(): Promise<RelayEntry[]> {
     const relay = this.relay;
     const engine = this.engine;
-    if (!relay || !engine) return;
+    if (!relay || !engine) return [];
     const now = Date.now();
     const version = engine.state.version;
     // The room stays alive with a heartbeat, the views are published when
     // something changes.
-    if (version === this.relayVersion && now - this.relayPublishedAt < 3000) return;
-    this.relayVersion = version;
-    this.relayPublishedAt = now;
+    if (version === this.relayVersion && now - this.relayPublishedAt < 3000) return [];
 
     const views: Record<string, GameView> = {};
     for (const [key, playerId] of this.relaySeats) {
@@ -602,7 +658,10 @@ export class GameSession {
     for (const [key, entry] of this.relayVoice) {
       if (this.relaySeats.has(key)) voice[key] = entry;
     }
-    await relay.push({ views, welcome: { ...this.relayWelcome }, voice, errors });
+    const messages = await relay.push({ views, welcome: { ...this.relayWelcome }, voice, errors });
+    this.relayVersion = version;
+    this.relayPublishedAt = now;
+    return messages;
   }
 
   /** The host takes a guest that came through the backup channel. */
@@ -756,8 +815,9 @@ export class GameSession {
     if (this.snapshot.mode === 'guest') {
       // Over the backup channel the actions go through the room service.
       if (this.relay) {
-        const id = `${this.relayKey}:${this.relayCounter += 1}`;
-        void this.relay.send(this.relayKey, id, { kind: 'action', action });
+        // The action goes with the next request of the guest — that halves
+        // the number of requests.
+        this.relayPending = { kind: 'action', action };
         return;
       }
       this.guestNet?.send(action);
@@ -876,7 +936,7 @@ export class GameSession {
   /** Stops the backup channel. */
   private stopRelay(): void {
     if (this.relayTimer !== null) {
-      window.clearInterval(this.relayTimer);
+      window.clearTimeout(this.relayTimer);
       this.relayTimer = null;
     }
     void this.relay?.close();

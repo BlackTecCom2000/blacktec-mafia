@@ -84,6 +84,32 @@ describe('the backup channel', () => {
     expect(Object.keys((after.views ?? {}) as Record<string, unknown>)).toHaveLength(0);
   });
 
+  it('publishes and collects in one request', async () => {
+    await post('/api/relay/room7/guest', {
+      id: 'm1',
+      key: 'k1',
+      payload: { kind: 'action', action: { type: 'lobbyReady', ready: true } },
+    });
+    const response = await post('/api/relay/room7/host', {
+      views: { k1: { version: 3 } },
+      welcome: { k1: 'g1' },
+      voice: {},
+      errors: {},
+    });
+    const payload = (await response.json()) as {
+      actions?: Array<{ id: string; key: string; payload: { kind: string } }>;
+    };
+    expect(payload.actions).toHaveLength(1);
+    expect(payload.actions?.[0]?.key).toBe('k1');
+    expect(payload.actions?.[0]?.payload.kind).toBe('action');
+
+    // The guest sees the new state and knows that the host is alive.
+    const guest = await get('/api/relay/room7/guest');
+    expect(Object.keys((guest.views ?? {}) as Record<string, unknown>)).toHaveLength(1);
+    expect(typeof guest.updatedAt).toBe('number');
+    expect((guest.updatedAt as number) ?? 0).toBeGreaterThan(0);
+  });
+
   it('never stores a password of a room', async () => {
     await post('/api/rooms', {
       code: 'room6',

@@ -1,4 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useState, useSyncExternalStore, type ReactElement } from 'react';
+import { AdminGate, useAdmin } from './admin/AdminGate';
+import { AdminDashboard } from './admin/AdminDashboard';
 import { Game } from './components/Game';
 import { Lobby } from './components/Lobby';
 import { Menu } from './components/Menu';
@@ -243,7 +245,7 @@ function Root() {
   }
 
   return (
-    <>
+    <AdminGate>
       <Suspense fallback={<div className="screen screen--menu" />}>
         {content}
       </Suspense>
@@ -260,6 +262,24 @@ function Root() {
           <span>{t(snapshot.actionError)}</span>
         </div>
       ) : null}
-    </>
+      <AdminOverlay
+        view={snapshot.view}
+        mode={snapshot.mode ?? 'solo'}
+        code={snapshot.code}
+        isHost={snapshot.isHost}
+        roomsCount={snapshot.rooms.length}
+        discoveryUrl={discoveryUrl}
+        voicePublished={snapshot.voicePublishing}
+        voiceMuted={snapshot.voiceMuted}
+        peerId={snapshot.myId}
+      />
+    </AdminGate>
   );
+}
+
+/** Renders the dashboard when the admin panel was opened. */
+function AdminOverlay(props: React.ComponentProps<typeof AdminDashboard>) {
+  const { dashboardOpen } = useAdmin();
+  if (!dashboardOpen) return null;
+  return <AdminDashboard {...props} />;
 }

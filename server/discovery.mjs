@@ -100,6 +100,7 @@ export function createDiscoveryServer(options = {}) {
         welcome: entry?.welcome ?? {},
         voice: entry?.voice ?? {},
         errors: entry?.errors ?? {},
+        updatedAt: entry?.updatedAt ?? 0,
       });
       return;
     }
@@ -125,6 +126,10 @@ export function createDiscoveryServer(options = {}) {
           entry.welcome = payload?.welcome ?? {};
           entry.voice = payload?.voice ?? {};
           entry.errors = payload?.errors ?? {};
+          // Publishing and collecting in one request keeps the quota small.
+          const actions = entry.actions.splice(0, entry.actions.length);
+          send(res, 200, { ok: true, actions });
+          return;
         } else {
           if (payload?.id) {
             entry.actions.push({
@@ -134,6 +139,16 @@ export function createDiscoveryServer(options = {}) {
             });
           }
           if (entry.actions.length > 200) entry.actions.splice(0, entry.actions.length - 200);
+          // The guest reads the state of the host in the same request.
+          send(res, 200, {
+            ok: true,
+            views: entry.views,
+            welcome: entry.welcome,
+            voice: entry.voice,
+            errors: entry.errors,
+            updatedAt: entry.updatedAt,
+          });
+          return;
         }
         send(res, 200, { ok: true });
       });
