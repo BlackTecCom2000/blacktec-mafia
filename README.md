@@ -251,16 +251,22 @@ git subtree push --prefix dist origin gh-pages
 
 | Часть | Что это | Адрес |
 | --- | --- | --- |
-| `server/discovery-worker.mjs` | сервис комнат: каталог и резервный канал (Worker + Durable Objects) | `https://blacktec-rooms.djaborov2000.workers.dev` |
+| `server/discovery-worker.mjs` | сервис комнат: каталог и резервный канал (Worker + D1) | `https://blacktec-rooms.djaborov2000.workers.dev` |
 | `dist` | сама игра (статические файлы) | `https://blacktec-mafia.djaborov2000.workers.dev` |
 
-**Сервис комнат** (Worker). Состояние лежит в Durable Objects: у каталога свой объект,
-у каждой комнаты — свой, поэтому комнаты не мешают друг другу.
+**Сервис комнат** (Worker). Состояние лежит в D1: у каждой комнаты своя строка, так
+что комнаты не мешают друг другу. Схема — в `server/migrations`.
 
 ```powershell
 npx wrangler login
-npx wrangler deploy                      # wrangler.jsonc — сервис комнат
+npx wrangler d1 create blacktec-rooms             # база данных (один раз)
+npx wrangler d1 execute blacktec-rooms --remote --file=server/migrations/0001_room_service.sql
+npx wrangler d1 execute blacktec-rooms --remote --file=server/migrations/0002_actions.sql
+npx wrangler deploy                               # wrangler.jsonc — сервис комнат
 ```
+
+Идентификатор базы данных из `wrangler d1 create` нужно вписать в `wrangler.jsonc`
+(`d1_databases`).
 
 **Игра** (статические файлы). Адрес сервиса зашивается в сборку, поэтому гости сразу
 получают каталог и резервный канал — настраивать ничего не нужно:
@@ -276,7 +282,8 @@ npx wrangler deploy --config wrangler.pages.jsonc
 ### Лимиты бесплатного тарифа Cloudflare
 
 На бесплатном тарифе Workers даёт **100 000 запросов в сутки** на весь аккаунт, и они
-обнуляются в 00:00 UTC. Сервис комнат тратит их так:
+обнуляются в 00:00 UTC. Сервис комнат тратит их так (состояние лежит в D1, там лимит
+отдельный — 100 000 записанных строк в сутки):
 
 * хост опрашивает сервис раз в 3 с, пока в комнате есть гости резервного канала, и раз
   в 5 с, пока он просто ждёт гостя;
@@ -402,7 +409,7 @@ src/
   i18n.tsx     русские строки (+ i18n.en.ts подгружается по требованию)
 server/
   discovery.mjs        сервис каталога и резервного канала для Node.js (без зависимостей)
-  discovery-worker.mjs тот же сервис для Cloudflare Workers (Durable Objects)
+  discovery-worker.mjs тот же сервис для Cloudflare Workers (D1)
 tests/         engine, rooms, i18n, admin, relay, discovery, errors
 ```
 

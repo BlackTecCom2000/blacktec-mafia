@@ -4,6 +4,10 @@
   //
   // Deploy:  npx wrangler deploy
   // The public address of the worker is printed at the end.
+  //
+  // The state lives in D1: the free plan of Cloudflare allows 100 000 written
+  // rows a day there, while a Durable Object would spend one of its 100 000
+  // requests a day on every poll of a room.
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "blacktec-rooms",
   "main": "server/discovery-worker.mjs",
@@ -11,22 +15,21 @@
   "observability": {
     "enabled": true
   },
-  "durable_objects": {
-    "bindings": [
-      {
-        "name": "CATALOG",
-        "class_name": "Catalog"
-      },
-      {
-        "name": "ROOMS",
-        "class_name": "Room"
-      }
-    ]
-  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "blacktec-rooms",
+      "database_id": "f6d1d702-8ce3-46e6-b71a-17b92f4801e6"
+    }
+  ],
   "migrations": [
     {
       "tag": "v1",
       "new_sqlite_classes": ["Catalog", "Room"]
+    },
+    {
+      "tag": "v2",
+      "deleted_classes": ["Catalog", "Room"]
     }
   ]
 }
